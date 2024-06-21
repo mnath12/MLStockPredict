@@ -1,5 +1,5 @@
 import { Flex, Heading, Icon, Link, Text, Image, Input, Button, HStack } from "@chakra-ui/react";
-import {useState } from 'react'
+import {useEffect, useState } from 'react'
 import {
     FiHome,
     FiPieChart,
@@ -14,13 +14,23 @@ import {
     FiBell
 } from "react-icons/fi"
 import StockChart from "./StockChart.tsx";
+import StockPlot from "./StockPlot.tsx";
+
+import axios from "axios";
 export default function StockDashboard() {
+    const [stockData, setStockData] = useState({});
+    console.log("HI")
+    
 
     const [stock, setStock] = useState("AMZN")
+    const [value, setValue] = useState("")
     console.log(stock)
-    function handleStockChange(stock: any){
-        console.log(stock)
-        setStock(stock)
+    const handleStockChange = (event:any) => {
+        setValue(event.target.value)
+    }
+    function handleClick() {
+        setStock(value)
+        setValue("")
     }
     const [result, setResult] = useState("");
     function handlePredictClick(stockString: any) {
@@ -41,7 +51,7 @@ export default function StockDashboard() {
             setResult(response.Prediction);
           });
       };
-      console.log(result)
+      console.log("Result: ",result)
 
 
     return (
@@ -91,14 +101,7 @@ export default function StockDashboard() {
 
                             </Flex>
 
-                            <Flex className="sidebar-items">
-                                <Link>
-                                    <Icon as ={FiHome} fontSize="2xl"/>
-                                </Link>
-                                <Link _hover = {{ textDecor: 'none' }}>
-                                    <Text>DJIA</Text>
-                                </Link>
-                            </Flex>
+                            
 
                             <Flex className="sidebar-items">
                                 <Link>
@@ -114,7 +117,7 @@ export default function StockDashboard() {
                                     <Icon as ={FiHome} fontSize="2xl"/>
                                 </Link>
                                 <Link _hover = {{ textDecor: 'none' }}>
-                                    <Text>Live Predict</Text>
+                                    <Text>Research</Text>
                                 </Link>
                             </Flex>
 
@@ -133,13 +136,14 @@ export default function StockDashboard() {
                 flexDir="column"
                 minH="100vh"
             >
-                <Heading fontWeight="normal" mb={4} letterSpacing="tight">Market Status</Heading>
+                <Heading fontWeight="normal" mb={4} letterSpacing="tight">Daily Prices, <Flex fontWeight="bold" display="inline-flex">{stock}</Flex></Heading>
                 {/*<Image src = '/download.png'
                                alt = 'sample image from ML model trained on IBM stock'
                                />*/}
-                <StockChart stock ={stock} handlePredictClick ={handlePredictClick}/>
+                {/*<StockChart stock ={stock} handlePredictClick ={handlePredictClick}/>*/}
+                <StockPlot/>
 
-                <HStack> <Input placeholder="Enter Stock" onChange={ (stock) => handleStockChange(stock)}/> <Button>Change</Button></HStack>
+                <HStack> <Input placeholder="Enter Stock" onChange={handleStockChange}/> <Button onClick = {handleClick}>Change</Button></HStack>
                 
             </Flex>
 
