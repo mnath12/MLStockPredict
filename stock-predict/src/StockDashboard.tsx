@@ -15,6 +15,9 @@ import {
 } from "react-icons/fi"
 import StockChart from "./StockChart.tsx";
 import StockPlot from "./StockPlot.tsx";
+import OptionsPricing from "./OptionsPricing.tsx"
+import OptionsPricePlotter from "./OptionsPricePlotter.tsx"
+
 
 import axios from "axios";
 export default function StockDashboard() {
@@ -159,7 +162,7 @@ export default function StockDashboard() {
                 overflow="auto"
             
             >
-
+                <OptionsPricePlotter/>
             </Flex>
         </Flex>
     )

@@ -9,12 +9,12 @@ const StockPlot = () => {
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
   const [stockData, setStockData] = useState(null);
-
+  console.log(startDate)
   const [result, setResult] = useState("");
   
   const fetchData = async () => {
     const apiKey = 'STQPhq8p9WHEeW24dWiNRkhPPjNjr2YL';
-    const url = `https://api.polygon.io/v2/aggs/ticker/${stock}/range/1/day/${startDate}/${endDate}?adjusted=true&sort=asc&limit=120&apiKey=${apiKey}`;
+    const url = `https://api.polygon.io/v2/aggs/ticker/${stock}/range/1/day/${startDate}/${endDate}?adjusted=true&sort=asc&apiKey=${apiKey}`;
     
     try {
       const response = await axios.get(url);
@@ -48,7 +48,7 @@ const StockPlot = () => {
     const headers = ['Date', 'Open', 'High', 'Low', 'Close', 'Volume', 'Name'];
     const rows = data.map(point => {
       return [
-        new Date(point.t).toISOString().split('T')[0],
+        new Date(point.t ).toISOString().split('T')[0],
         point.o,
         point.h,
         point.l,
@@ -80,6 +80,11 @@ const StockPlot = () => {
     })
       .then((response) => response.json())
       .then((response) => {
+        /* var res = response.Prediction;
+        var stripped_res = [];
+        for (let i = 0; i < res.length; ++i){
+          stripped_res.push(res[i][0])
+        } */
         setResult(response.Prediction);
       });
   };
@@ -90,7 +95,8 @@ const StockPlot = () => {
     console.log("Result: ",result)
   
   }
-  
+  var x_preds = plotData.x.slice(result.length)
+  console.log(x_preds)
   return (
     <div>
       <h1>Stock Data Plotter</h1>
@@ -123,14 +129,14 @@ const StockPlot = () => {
               marker: { color: 'red' },
             },
             {
-              x: plotData.x,
+              x: plotData.x.slice(-result.length),
               y: result,
               type: 'scatter',
               mode: 'lines+markers',
-              marker: { color: 'red' },
+              marker: { color: 'blue' },
             }
           ]}
-          layout={{ title: `${stock} Stock Prices`,datarevision: this.state.revise }}
+          layout={{ title: `${stock} Stock Prices` }}
         />
       )}
       <Button onClick ={handleClick}>Predict</Button>
