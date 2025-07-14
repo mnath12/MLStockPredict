@@ -25,7 +25,7 @@ export default function StockDashboard() {
     console.log("HI")
     
 
-    const [stock, setStock] = useState("AMZN")
+    const [stock, setStock] = useState("UBR")
     const [value, setValue] = useState("")
     console.log(stock)
     const handleStockChange = (event:any) => {

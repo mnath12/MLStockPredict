@@ -1,0 +1,77 @@
+{
+  "configuration": {
+    "ticker": "TSLA",
+    "window_size": 500,
+    "forecast_horizon": 10,
+    "refit_frequency": 10,
+    "confidence_level": 0.95,
+    "data_source": "alpaca",
+    "start_date": "2023-02-03",
+    "end_date": "2025-06-27"
+  },
+  "data_quality": {
+    "data_quality_score": 47.83468474751701,
+    "alpaca_available": true
+  },
+  "performance": {
+    "mae": 0.7767972610699205,
+    "mse": 1.1224703487577274,
+    "rmse": 1.0594670116420462,
+    "mape": 25.073981562889475,
+    "r2": -0.250998235219575,
+    "directional_accuracy": 41.25,
+    "ci_coverage": 98.76543209876543,
+    "model_performance": {
+      "HAR_Basic": {
+        "rmse": 0.9073229979340931,
+        "avg_weight": 0.2695707559608422
+      },
+      "HAR_CJ": {
+        "rmse": 0.9502417043558505,
+        "avg_weight": 0.19328306196339842
+      },
+      "HAR_CJ_Q": {
+        "rmse": 0.9299073271071168,
+        "avg_weight": 0.2515296577697509
+      },
+      "HAR_Log": {
+        "rmse": 0.875920806887524,
+        "avg_weight": 0.22287018715394025
+      },
+      "GARCH_Best": {
+        "rmse": 3.211989289089773,
+        "avg_weight": 0.03477004105343287
+      },
+      "Regime_Switching": {
+        "rmse": 3.211989289089773,
+        "avg_weight": 0.03394699578594316
+      },
+      "State_Space": {
+        "rmse": 3.211989289089773,
+        "avg_weight": 0.0333591063091648
+      }
+    },
+    "regime_performance": {
+      "Low": {
+        "rmse": 0.7692541591890497,
+        "count": "36"
+      },
+      "Medium": {
+        "rmse": 1.1727699285268118,
+        "count": "23"
+      },
+      "High": {
+        "rmse": 1.3139647431447257,
+        "count": "22"
+      }
+    },
+    "n_predictions": 81
+  },
+  "performance_score": 19.574046101289955,
+  "model_info": {
+    "total_models": 7,
+    "fitted_windows": 9,
+    "predictions_generated": 81
+  },
+  "timestamp": "2025-06-27T12:47:25.494930"
+}

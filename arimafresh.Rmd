@@ -1,0 +1,344 @@
+---
+title: "arima_garchv2"
+author: "Moinak Nath"
+date: "2025-03-30"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 1. Getting Stock Data
+
+```{r}
+library(quantmod)
+library(PerformanceAnalytics)
+```
+
+```{r}
+# Define the ticker symbol as a variable
+ticker <- "AAPL"
+
+# Define the date range
+start_date <- "2016-04-08"
+end_date   <- "2025-04-10"
+
+# Get data using the ticker variable
+data <- getSymbols(ticker, src = "yahoo", from = start_date, to = end_date, auto.assign = FALSE)
+close_prices <- Cl(data)
+returns <- dailyReturn(close_prices)
+
+
+```
+
+```{r}
+cat("Number of days: ", length(close_prices))
+
+```
+
+## Basic Plots
+
+```{r}
+
+# Plot closing prices with dynamic title using sprintf
+plot(close_prices, main = sprintf("%s Close", ticker))
+
+# Plot daily returns with dynamic title using sprintf
+plot(returns, main = sprintf("%s Daily Returns", ticker), col = "blue", type = "l")
+
+```
+
+```{r}
+library(forecast)
+library(rugarch)
+
+arima_garch_prediction <- function(time_series, initial_window, days_ahead) {
+  n <- length(time_series)
+  forecasted_prices <- list()
+  forecasted_volatilities <- list()
+  
+  for (i in seq(initial_window, n - days_ahead)) {
+    training_data <- time_series[1:i]
+    
+    # Fit ARIMA
+    fit <- auto.arima(training_data)
+    arima_res <- residuals(fit)
+    
+    # GARCH(1,1) specification
+    spec <- ugarchspec(
+      variance.model = list(model = "sGARCH", garchOrder = c(1, 1)),
+      mean.model     = list(armaOrder = c(0, 0), include.mean = FALSE),
+      distribution.model = "norm"
+    )
+    
+    # Fit GARCH to residuals
+    garch_fit <- tryCatch(
+      ugarchfit(spec = spec, data = arima_res, solver.control = list(trace = 0)),
+      error = function(e) NULL
+    )
+    
+    if (is.null(garch_fit)) {
+      warning(paste("GARCH model failed to fit at index", i))
+      next
+    }
+    
+    # Forecast volatility
+    garch_forecast <- ugarchforecast(garch_fit, n.ahead = days_ahead)
+    forecasted_volatility <- as.numeric(garch_forecast@forecast$sigmaFor[1, ])
+    
+    # Forecast mean from ARIMA
+    arima_forecast <- forecast(fit, h = days_ahead)
+    arima_point_forecast <- as.numeric(arima_forecast$mean)
+    
+    # Simulate prices with random noise
+    random_shocks <- forecasted_volatility * rnorm(days_ahead)
+    final_forecasted_prices <- arima_point_forecast + random_shocks
+    
+    # Store results
+    forecasted_prices[[length(forecasted_prices) + 1]] <- final_forecasted_prices
+    forecasted_volatilities[[length(forecasted_volatilities) + 1]] <- forecasted_volatility
+  }
+  
+  return(list(
+    prices = forecasted_prices,
+    volatilities = forecasted_volatilities
+  ))
+}
+
+```
+
+```{r}
+print(length(log(close_prices)))
+res = arima_garch_prediction(log(close_prices), 10, 1)
+prices = res[1]
+vol = res[2]
+```
+
+```{r}
+x = prices$prices[1517]
+print(prices$prices[157])
+```
+
+```{r}
+library(quantmod)
+library(PerformanceAnalytics)
+library(forecast)
+library(rugarch)
+
+log_prices <- log(close_prices)
+
+# Run ARIMA-GARCH predictions
+prices <- unlist(res$prices)
+vol <- unlist(res$volatilities)
+
+# Create aligned actual log prices
+actual_log <- as.numeric(log_prices)
+forecast_start_index <- 11  # Because initial_window = 5
+actual_log_aligned <- actual_log[forecast_start_index:(forecast_start_index + length(prices) - 1)]
+plot(actual_log_aligned, type = "l", col = "black", lwd = 2,
+     main = sprintf("Forecasted vs Actual Log(%s) Prices", ticker),
+     ylab = "Log Price", xlab = "Days")
+# 📈 Plot: Forecasted vs Actual Log Prices
+plot(actual_log_aligned, type = "l", col = "black", lwd = 2,
+     main = sprintf("Forecasted vs Actual Log(%s) Prices", ticker),
+     ylab = "Log Price", xlab = "Days")
+lines(prices, col = "blue", lwd = 2)
+legend("topleft", legend = c("Actual", "Forecasted"), col = c("black", "blue"), lwd = 2)
+
+
+```
+
+```{r}
+library(zoo)
+
+# Compute daily log returns
+log_returns <- diff(as.numeric(log_prices))
+
+# Define rolling window size for realized volatility (e.g., 5 days)
+window_size <- 5
+
+# Compute rolling standard deviation (realized volatility)
+realized_vol <- rollapply(log_returns, width = window_size, FUN = sd, align = "right", fill = NA)
+
+# Align with forecasted volatility
+# The forecasts start from index 6, so realized_vol must be trimmed accordingly
+start_index <- 10 + 1  # initial_window + 1 (because of diff)
+realized_vol_aligned <- realized_vol[start_index:(start_index + length(vol) - 1)]
+
+# 🟦 Plot forecasted vs realized volatility
+plot(realized_vol_aligned, type = "l", col = "black", lwd = 2,
+     main = paste0("Forecasted vs Realized Volatility (", window_size, "-day rolling SD)"),
+     ylab = "Volatility", xlab = "Days")
+lines(vol, col = "red", lwd = 2)
+legend("topleft", legend = c("Realized", "Forecasted"), col = c("black", "red"), lwd = 2)
+
+```
+
+## Longer Forecast
+
+```{r}
+arima_garch_prediction_long_forecast <- function(time_series, initial_window, days_ahead) {
+  n <- length(time_series)
+  forecasted_prices <- rep(NA, n)        # Pre-fill with NAs
+  forecasted_volatilities <- rep(NA, n)  # Same length as time_series
+
+  # Step forward in chunks of 'days_ahead'
+  for (i in seq(initial_window, n - days_ahead, by = days_ahead)) {
+    training_data <- time_series[1:i]
+    
+    # Fit ARIMA
+    fit <- auto.arima(training_data)
+    arima_res <- residuals(fit)
+    
+    # GARCH(1,1) specification
+    spec <- ugarchspec(
+      variance.model = list(model = "sGARCH", garchOrder = c(1, 1)),
+      mean.model     = list(armaOrder = c(0, 0), include.mean = FALSE),
+      distribution.model = "norm"
+    )
+    
+    # Fit GARCH to residuals
+    garch_fit <- tryCatch(
+      ugarchfit(spec = spec, data = arima_res, solver.control = list(trace = 0)),
+      error = function(e) NULL
+    )
+    
+    if (is.null(garch_fit)) {
+      warning(paste("GARCH model failed to fit at index", i))
+      next
+    }
+    
+    # Forecast volatility
+    garch_forecast <- ugarchforecast(garch_fit, n.ahead = days_ahead)
+    forecasted_volatility <- as.numeric(garch_forecast@forecast$sigmaFor[1, ])
+    
+    # Forecast price via ARIMA
+    arima_forecast <- forecast(fit, h = days_ahead)
+    arima_point_forecast <- as.numeric(arima_forecast$mean)
+    
+    # Simulate price path
+    random_shocks <- forecasted_volatility * rnorm(days_ahead)
+    final_forecasted_prices <- arima_point_forecast + random_shocks
+    lower_bound <- arima_point_forecast - 1.96 * forecasted_volatility
+    upper_bound <- arima_point_forecast + 1.96 * forecasted_volatility
+
+    
+    # Store forecasts
+    indices <- (i + 1):(i + days_ahead)
+    if (max(indices) <= n) {
+      forecasted_prices[indices] <- final_forecasted_prices
+      forecasted_volatilities[indices] <- forecasted_volatility
+    }
+  }
+
+  return(list(
+    prices = forecasted_prices,
+    volatilities = forecasted_volatilities,
+    low = lower_bound,
+    high = upper_bound
+  ))
+}
+
+```
+
+```{r}
+res1 = arima_garch_prediction_long_forecast(log(close_prices), 10, 5)
+prices1 = res1[1]
+vol1 = res1[2]
+low1 = res1[3]
+high1 = res1[4]
+```
+
+```{r}
+str(prices1)
+print(exp(prices1$prices[2265]))
+
+```
+
+```{r}
+str(low1)
+```
+
+```{r}
+
+library(quantmod)
+library(PerformanceAnalytics)
+library(forecast)
+library(rugarch)
+
+log_prices <- log(close_prices)
+
+# Run ARIMA-GARCH predictions
+prices <- unlist(res1$prices)
+vol <- unlist(res1$volatilities)
+
+# Create aligned actual log prices
+actual_log <- as.numeric(log_prices)
+forecast_start_index <- 11  # Because initial_window = 5
+actual_log_aligned <- actual_log[forecast_start_index:(forecast_start_index + length(prices) - 10 - 1)]
+
+# Shift the forecasted series left by one step to align with actual data
+shift_left <- function(x, k = 1) {
+  c(x[(k + 1):length(x)], rep(NA, k))
+}
+
+cat("Length of prices: ", length(prices), "\n")
+cat("Length of QQQ returns: ", length(actual_log_aligned), "\n")
+
+print(prices)
+# Example: align price forecasts
+forecasted_prices_aligned <- prices[forecast_start_index:(forecast_start_index + length(prices) - 10 - 1)]
+
+plot(actual_log_aligned, type = "l", col = "black", lwd = 2,
+     main = "Forecasted vs Actual Log(QQQ) Prices",
+     ylab = "Log Price", xlab = "Days")
+# 📈 Plot: Forecasted vs Actual Log Prices
+plot(actual_log_aligned, type = "l", col = "black", lwd = 2,
+     main = "Forecasted vs Actual Log(QQQ) Prices",
+     ylab = "Log Price", xlab = "Days")
+lines(forecasted_prices_aligned, col = "blue", lwd = 2)
+legend("topleft", legend = c("Actual", "Forecasted"), col = c("black", "blue"), lwd = 2)
+
+
+```
+
+```{r}
+
+library(zoo)
+
+# Compute daily log returns
+log_returns <- diff(as.numeric(log_prices))
+
+# Define rolling window size for realized volatility (e.g., 5 days)
+window_size <- 10
+
+# Compute rolling standard deviation (realized volatility)
+realized_vol <- rollapply(log_returns, width = window_size, FUN = sd, align = "right", fill = NA)
+
+# Align with forecasted volatility
+# The forecasts start from index 6, so realized_vol must be trimmed accordingly
+start_index <- 10 + 1  # initial_window + 1 (because of diff)
+realized_vol_aligned <- realized_vol[start_index:(start_index + length(vol) - 1)]
+forecasted_vol_aligned <- shift_left(vol, k = 10)
+
+# 🟦 Plot forecasted vs realized volatility
+plot(realized_vol_aligned, type = "l", col = "black", lwd = 2,
+     main = paste0("Forecasted vs Realized Volatility (", window_size, "-day rolling SD)"),
+     ylab = "Volatility", xlab = "Days")
+lines(forecasted_vol_aligned, col = "red", lwd = 2)
+legend("topleft", legend = c("Realized", "Forecasted"), col = c("black", "red"), lwd = 2)
+
+```
+
+## TO-DO
+
+-   Clean up code
+
+-   Metrics: Mean squared error, what percent of time did it predict the direction of price movement for next days_ahead days, percent error in volatility daily
+
+-   bands
+
+-   Generate strategies: Sharpe ratio, buy if predict up, sell if predict down, hedging
+
+    -   Delta hedging: for short time period estimates the volatility forecast as a kind of average, so if it surges above that hedge and bet that it will fall to the mean

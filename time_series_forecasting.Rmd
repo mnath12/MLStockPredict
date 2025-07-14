@@ -1,0 +1,689 @@
+---
+title: "Time Series"
+author: "Moinak Nath"
+date: "2025-03-29"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 1. Data and Setup
+
+## a. Install necessary packages
+
+```{r}
+install.packages("quantmod")
+install.packages("PerformanceAnalytics")
+
+
+```
+
+## b. Get full stock data set for ticker
+
+```{r}
+# Define the date range
+start_date <- "2005-03-28"
+end_date   <- "2025-03-28"
+
+# Get QQQ data from Yahoo Finance for the specified date range
+getSymbols("QQQ", src = "yahoo", from = start_date, to = end_date)
+
+```
+
+## c. Plot stock returns
+
+```{r}
+# Plot the QQQ closing prices using chartSeries
+chartSeries(QQQ, subset = paste0(start_date, "/", end_date),
+            theme = chartTheme("white"),
+            type = "line",
+            name = "QQQ Closing Prices")
+```
+
+## d. Compute returns
+
+```{r}
+library(PerformanceAnalytics)
+
+# Compute daily returns using closing prices
+qqq_returns <- dailyReturn(Cl(QQQ))
+
+# Store returns in an array (numeric vector)
+qqq_returns_array <- coredata(qqq_returns)
+
+```
+
+## e. Plot returns
+
+```{r}
+# Plot the returns using PerformanceAnalytics chart
+plot(qqq_returns, main = "QQQ Daily Returns", col = "blue", type = "l")
+```
+
+# 2. Prepare Data
+
+```{r}
+qqq_close <- Cl(QQQ)  
+log_diff = diff(log(qqq_close))
+plot(log_diff,type='l',main='Difference Log QQQ')
+```
+
+## b. Fit ARIMA (auto) to log stock price
+
+```{r}
+library(forecast)
+
+# Fit an ARIMA model using auto.arima (it selects the best orders automatically)
+fit <- auto.arima(log(qqq_close))
+
+# Print the model; you'll see the AICc reported in the output.
+print(fit)
+
+# Alternatively, extract the AICc value directly:
+print(paste("AICc:", fit$aicc))
+
+arima_res <- fit$res
+```
+
+## c. Fit GARCH(p,q) to residuals of ARIMA
+
+```{r}
+library(tseries)
+
+# Assume res.arima212 is available.
+# If not, for demonstration, you could simulate data:
+# set.seed(123)
+# res.arima212 <- rnorm(200)
+
+# Initialize a data frame to store the results
+results <- data.frame(p = numeric(),
+                      q = numeric(),
+                      with_constant = logical(),
+                      AIC = numeric(),
+                      AICc = numeric(),
+                      stringsAsFactors = FALSE)
+
+# Loop over the two choices for p and q, and for constant vs. no constant.
+for (p in c(0, 2)) {
+  for (q in c(0, 8)) {
+    for (with_const in c(TRUE, FALSE)) {
+      # If with_const is FALSE, subtract the mean to force the constant to zero.
+      if (with_const) {
+        x_fit <- arima_res
+      } else {
+        x_fit <- arima_res - mean(arima_res)
+      }
+      
+      # Fit the GARCH model using the built-in garch() function.
+      # Use try() to skip over any model that fails to converge.
+      fit_model <- try(garch(x_fit, order = c(p, q), trace = FALSE), silent = TRUE)
+      if (inherits(fit_model, "try-error")) {
+        next
+      }
+      
+      # Compute AIC from the fitted model
+      model_aic <- AIC(fit_model)
+      
+      # Number of estimated parameters in the model
+      # Coefficients are stored in fit_model$coef.
+      k <- length(fit_model$coef)
+      
+      # Number of observations
+      n <- length(x_fit)
+      
+      # Compute AICc manually using the formula:
+      model_aicc <- model_aic + (2 * k * (k + 1)) / (n - k - 1)
+      
+      # Append results to our data frame
+      results <- rbind(results, data.frame(p = p,
+                                           q = q,
+                                           with_constant = with_const,
+                                           AIC = model_aic,
+                                           AICc = model_aicc))
+    }
+  }
+}
+
+# Print the results for comparison
+print(results)
+best_model <- results[which.min(results$AIC), ]
+print(best_model)
+```
+
+Train-Test Split
+
+```{r}
+library(tseries)
+library(forecast)
+
+
+# Define the date range
+start_date <- "2015-03-28"
+end_date   <- "2025-03-28"
+
+# Get QQQ data from Yahoo Finance for the specified date range
+getSymbols("QQQ", src = "yahoo", from = start_date, to = end_date)
+
+qqq_close <- Cl(QQQ)  
+
+cat("Length of data (number of days): ", length(qqq_close), "\n")
+# 2500 is our dataset size
+
+print(qqq_close)
+
+# Set number of days to forecast
+days_ahead <- 250
+
+# Total number of observations
+n <- nrow(qqq_close)
+
+# Training data: from start to (n - days_ahead)
+train_data <- log(qqq_close[1:(n - days_ahead)])
+
+# Test data: last days_ahead observations
+test_data <- log(qqq_close[(n - days_ahead + 1):n])
+
+# Optional: confirm the lengths
+cat("Training data length:", length(train_data), "\n")
+cat("Test data length:", length(test_data), "\n")
+
+
+```
+
+```{r}
+
+# Fit an ARIMA model using auto.arima (it selects the best orders automatically)
+fit <- auto.arima(train_data)
+
+# Print the model; you'll see the AICc reported in the output.
+print(fit)
+
+# Alternatively, extract the AICc value directly:
+print(paste("AICc:", fit$aicc))
+
+arima_res <- fit$res
+
+# Initialize a data frame to store the results
+results <- data.frame(p = numeric(),
+                      q = numeric(),
+                      with_constant = logical(),
+                      AIC = numeric(),
+                      AICc = numeric(),
+                      stringsAsFactors = FALSE)
+
+# Loop over the two choices for p and q, and for constant vs. no constant.
+for (p in c(0, 2)) {
+  for (q in c(0, 8)) {
+    for (with_const in c(TRUE, FALSE)) {
+      # If with_const is FALSE, subtract the mean to force the constant to zero.
+      if (with_const) {
+        x_fit <- arima_res
+      } else {
+        x_fit <- arima_res - mean(arima_res)
+      }
+      
+      # Fit the GARCH model using the built-in garch() function.
+      # Use try() to skip over any model that fails to converge.
+      fit_model <- try(garch(x_fit, order = c(p, q), trace = FALSE), silent = TRUE)
+      if (inherits(fit_model, "try-error")) {
+        next
+      }
+      
+      # Compute AIC from the fitted model
+      model_aic <- AIC(fit_model)
+      
+      # Number of estimated parameters in the model
+      # Coefficients are stored in fit_model$coef.
+      k <- length(fit_model$coef)
+      
+      # Number of observations
+      n <- length(x_fit)
+      
+      # Compute AICc manually using the formula:
+      model_aicc <- model_aic + (2 * k * (k + 1)) / (n - k - 1)
+      
+      # Append results to our data frame
+      results <- rbind(results, data.frame(p = p,
+                                           q = q,
+                                           with_constant = with_const,
+                                           AIC = model_aic,
+                                           AICc = model_aicc))
+    }
+  }
+}
+
+# Print the results for comparison
+print(results)
+best_model <- results[which.min(results$AIC), ]
+print(best_model)
+
+
+```
+
+```{r}
+#IF FALSE subtract mean
+arch08=garch(arima_res-mean(arima_res),order=c(0,8),trace=F)
+summary(arch08)
+```
+
+```{r}
+
+ht.arch08=arch08$fit[,1]^2 #use 1st column of fit
+plot(ht.arch08,main='Conditional variances')
+cat("Length of ht.arch08")
+print(length(ht.arch08))
+
+fit411=fitted.values(fit)
+#cat("here is fit 411\n")
+print(fit411)
+plot(fit411)
+
+cat(length(fit411))
+low=fit411-1.96*sqrt(ht.arch08)
+high=fit411+1.96*sqrt(ht.arch08)
+plot(train_data,type='l',main='Log QQQ,Low,High')
+lines(low,col='red')
+lines(high,col='blue')
+```
+
+```{r}
+# Plot the actual training data
+plot(train_data, type = 'l', col = 'black', lwd = 1.5,
+     main = 'Training Data with Fitted Values and Confidence Bands',
+     ylab = 'QQQ Close', xlab = 'Date')
+
+# Overlay the fitted values (mean prediction)
+lines(xts(fit411, order.by = index(train_data)), col = 'red', lwd = 2)
+
+# Overlay the confidence bands
+lines(xts(low, order.by = index(train_data)), col = 'blue', lty = 2)
+lines(xts(high, order.by = index(train_data)), col = 'blue', lty = 2)
+
+# Add a legend
+legend("topleft", 
+       legend = c("Actual (Training Data)", "Fitted Values", "95% Confidence Interval"),
+       col = c("black", "red", "blue"),
+       lty = c(1, 1, 2),
+       lwd = c(1.5, 2, 1.5))
+
+```
+
+```{r}
+range_dates <- "2022-03-01/2022-05-07"
+plot(train_data[range_dates], type = 'l', col = 'black', lwd = 1.5,
+     main = 'Zoomed-In Fit (Specific Date Range)',
+     ylab = 'QQQ Close', xlab = 'Date')
+
+lines(xts(fit411, order.by = index(train_data))[range_dates], col = 'red', lwd = 2)
+lines(xts(low, order.by = index(train_data))[range_dates], col = 'blue', lty = 2)
+lines(xts(high, order.by = index(train_data))[range_dates], col = 'blue', lty = 2)
+
+```
+
+```{r}
+# Plot of forecast vs test dataset
+
+forecast_vector=forecast(fit,250,level=95) 
+
+#cat("Here's the forecast: \n")
+#print(forecast_vector$mean)
+#cat("Forecast length: ", length(forecast_vector), "\n")
+plot(forecast_vector)
+#str(forecast_vector)
+# Convert forecast to an xts object with the same time index as test_data
+forecast_series <- xts(forecast_vector$mean, order.by = index(test_data))
+
+# Plot the actual test data
+plot(test_data, type = 'l', col = 'black', lwd = 2,
+     main = 'Forecast vs Actual (Test Data)',
+     ylab = 'QQQ Close', xlab = 'Date')
+
+# Add the forecast
+lines(forecast_series, col = 'blue', lwd = 2)
+
+legend("topleft", legend = c("Actual Test Data", "Forecast"),
+       col = c("black", "blue"), lty = 1, lwd = 2)
+
+```
+
+```{r}
+library(rugarch)
+spec <- ugarchspec(
+  variance.model = list(model = "sGARCH", garchOrder = c(0, 8)),
+  mean.model     = list(armaOrder = c(0, 0), include.mean = FALSE),
+  distribution.model = "norm"
+)
+garch_fit <- ugarchfit(spec, arima_res - mean(arima_res))
+garch_forecast <- ugarchforecast(garch_fit, n.ahead = 250)
+
+# Extract forecasted variance
+sigma_forecast <- sigma(garch_forecast)# Compute upper and lower bounds
+plot(sigma_forecast)
+print(sigma_forecast)
+low_forecast  <- forecast_vector$mean - 1.96 * sigma_forecast
+high_forecast <- forecast_vector$mean + 1.96 * sigma_forecast
+
+# Convert everything to xts to align with test_data
+forecast_dates <- index(test_data)  # Use the same index
+mean_xts <- xts(forecast_vector$mean, order.by = forecast_dates)
+low_xts  <- xts(low_forecast, order.by = forecast_dates)
+high_xts <- xts(high_forecast, order.by = forecast_dates)
+
+
+plot(test_data, type = 'l', col = 'black', lwd = 1.5,
+     main = 'Test Data with Forecast and Confidence Bands',
+     ylab = 'QQQ Close', xlab = 'Date')
+
+lines(mean_xts, col = 'red', lwd = 2)
+lines(low_xts, col = 'blue', lty = 2)
+lines(high_xts, col = 'blue', lty = 2)
+
+legend("topleft",
+       legend = c("Actual (Test)", "Forecasted Mean", "95% Confidence Band"),
+       col = c("black", "red", "blue"),
+       lty = c(1, 1, 2),
+       lwd = c(1.5, 2, 1.5))
+
+```
+
+```{r}
+plot(exp(test_data), type = 'l', col = 'black', lwd = 1.5,
+     main = 'Test Data with Forecast and Confidence Bands',
+     ylab = 'QQQ Close', xlab = 'Date')
+
+lines(exp(mean_xts), col = 'red', lwd = 2)
+lines(exp(low_xts), col = 'blue', lty = 2)
+lines(exp(high_xts), col = 'blue', lty = 2)
+
+legend("topleft",
+       legend = c("Actual (Test)", "Forecasted Mean", "95% Confidence Band"),
+       col = c("black", "red", "blue"),
+       lty = c(1, 1, 2),
+       lwd = c(1.5, 2, 1.5))
+
+```
+
+```{r}
+library(quantmod)
+
+# Assuming you've already loaded QQQ data:
+# getSymbols("QQQ", from = start_date, to = end_date)
+qqq_close <- Cl(QQQ)  # Adjusted close
+
+# Compute daily log returns
+qqq_returns <- dailyReturn(qqq_close, type = "log")
+
+days_ahead <- 25
+n <- nrow(qqq_returns)
+
+train_returns <- qqq_returns[1:(n - days_ahead)]
+test_returns  <- qqq_returns[(n - days_ahead + 1):n]
+
+# 21-day rolling volatility (1-month window)
+train_vol <- runSD(train_returns, n = 25)
+test_vol  <- runSD(test_returns, n = 25)
+
+train_volatility <- sd(train_returns, na.rm = TRUE)
+test_volatility  <- sd(test_returns, na.rm = TRUE)
+
+cat("Train volatility (daily):", train_volatility, "\n")
+cat("Test volatility (daily):", test_volatility, "\n")
+
+plot(train_vol, main = "Rolling Volatility (Train Set)", col = "darkgreen", lwd = 2)
+plot(test_vol, main = "Rolling Volatility (Test Set)", col = "purple", lwd = 2)
+
+
+```
+
+Attempt to obtain a better estimate by using 1 day ahead repeatedly
+
+```{r}
+library(tseries)
+library(forecast)
+
+# Define the date range
+start_date <- "2025-03-20"
+end_date   <- "2025-03-28"
+
+# Get QQQ data from Yahoo Finance for the specified date range
+getSymbols("QQQ", src = "yahoo", from = start_date, to = end_date)
+
+# Close prices
+qqq_close <- Cl(QQQ)  
+
+# Set number of days to forecast
+days_ahead <- 1
+
+# Total number of observations
+n <- nrow(qqq_close)
+
+# Training data: from start to (n - days_ahead)
+train_data <- log(qqq_close[1:(n - days_ahead)])
+
+# Test data: last days_ahead observations
+test_data <- log(qqq_close[(n - days_ahead + 1):n])
+
+# Fit an ARIMA model using auto.arima (it selects the best orders automatically)
+fit <- auto.arima(train_data)
+
+arima_res <- fit$res
+
+# Initialize a data frame to store the results
+results <- data.frame(p = numeric(),
+                      q = numeric(),
+                      with_constant = logical(),
+                      AIC = numeric(),
+                      AICc = numeric(),
+                      stringsAsFactors = FALSE)
+
+# Loop over the two choices for p and q, and for constant vs. no constant.
+for (p in c(0, 2)) {
+  for (q in c(0, 8)) {
+    for (with_const in c(TRUE, FALSE)) {
+      # If with_const is FALSE, subtract the mean to force the constant to zero.
+      if (with_const) {
+        x_fit <- arima_res
+      } else {
+        x_fit <- arima_res - mean(arima_res)
+      }
+      
+      # Fit the GARCH model using the built-in garch() function.
+      # Use try() to skip over any model that fails to converge.
+      fit_model <- try(garch(x_fit, order = c(p, q), trace = FALSE), silent = TRUE)
+      if (inherits(fit_model, "try-error")) {
+        next
+      }
+      
+      # Compute AIC from the fitted model
+      model_aic <- AIC(fit_model)
+      
+      # Number of estimated parameters in the model
+      # Coefficients are stored in fit_model$coef.
+      k <- length(fit_model$coef)
+      
+      # Number of observations
+      n <- length(x_fit)
+      
+      # Compute AICc manually using the formula:
+      model_aicc <- model_aic + (2 * k * (k + 1)) / (n - k - 1)
+      
+      # Append results to our data frame
+      results <- rbind(results, data.frame(p = p,
+                                           q = q,
+                                           with_constant = with_const,
+                                           AIC = model_aic,
+                                           AICc = model_aicc))
+    }
+  }
+}
+
+p = results[which.min(results$AIC), ]$p
+q = results[which.min(results$AIC), ]$q
+with_constant = results[which.min(results$AIC), ]$with_constant
+
+if (with_constant) {
+    arch08=garch(arima_res,order=c(p,q),trace=F)
+    spec <- ugarchspec(variance.model = list(model = "sGARCH", garchOrder = c(p, q)),
+                        mean.model     = list(armaOrder = c(0, 0), include.mean = FALSE),
+                        distribution.model = "norm")
+    garch_fit <- ugarchfit(spec, arima_res)
+} else {
+    arch08=garch(arima_res-mean(arima_res),order=c(p,q),trace=F)
+    spec <- ugarchspec(variance.model = list(model = "sGARCH", garchOrder = c(p, q)),
+                        mean.model     = list(armaOrder = c(0, 0), include.mean = FALSE),
+                        distribution.model = "norm")
+    garch_fit <- ugarchfit(spec, arima_res-mean(arima_res))
+}
+
+garch_forecast <- ugarchforecast(garch_fit, n.ahead = days_ahead)
+forecasted_volatility <- garch_forecast@forecast$sigmaFor
+print(forecasted_volatility)
+arima_forecast=forecast(fit,days_ahead,level=95) 
+
+
+arima_point_forecast <- as.numeric(arima_forecast$mean )
+
+random_shocks <- forecasted_volatility * rnorm (days_ahead)
+final_forecasted_prices <- arima_point_forecast + random_shocks
+
+
+
+
+
+
+```
+
+Function to run loop
+
+```{r}
+arima_garch_prediction <- function(time_series, initial_window, days_ahead) {
+  n <- length(time_series)
+  forecasted_prices <- list()
+  forecasted_volatilities <- list()
+  for (i in seq(initial_window, n - days_ahead)) {
+      training_data = time_series[1:i]
+      # Fit an ARIMA model using auto.arima (it selects the best orders automatically)
+      fit <- auto.arima(train_data)
+      
+      arima_res <- fit$res
+      
+      # Initialize a data frame to store the results
+      results <- data.frame(p = numeric(),
+                            q = numeric(),
+                            with_constant = logical(),
+                            AIC = numeric(),
+                            AICc = numeric(),
+                            stringsAsFactors = FALSE)
+      
+      # Loop over the two choices for p and q, and for constant vs. no constant.
+      for (p in c(0, 2)) {
+        for (q in c(0, 8)) {
+          for (with_const in c(TRUE, FALSE)) {
+            # If with_const is FALSE, subtract the mean to force the constant to zero.
+            if (with_const) {
+              x_fit <- arima_res
+            } else {
+              x_fit <- arima_res - mean(arima_res)
+            }
+            
+            # Fit the GARCH model using the built-in garch() function.
+            # Use try() to skip over any model that fails to converge.
+            fit_model <- try(garch(x_fit, order = c(p, q), trace = FALSE), silent = TRUE)
+            if (inherits(fit_model, "try-error")) {
+              next
+            }
+            
+            # Compute AIC from the fitted model
+            model_aic <- AIC(fit_model)
+            
+            # Number of estimated parameters in the model
+            # Coefficients are stored in fit_model$coef.
+            k <- length(fit_model$coef)
+            
+            # Number of observations
+            n <- length(x_fit)
+            
+            # Compute AICc manually using the formula:
+            model_aicc <- model_aic + (2 * k * (k + 1)) / (n - k - 1)
+            
+            # Append results to our data frame
+            results <- rbind(results, data.frame(p = p,
+                                                 q = q,
+                                                 with_constant = with_const,
+                                                 AIC = model_aic,
+                                                 AICc = model_aicc))
+          }
+        }
+      }
+      
+      p = results[which.min(results$AIC), ]$p
+      q = results[which.min(results$AIC), ]$q
+      with_constant = results[which.min(results$AIC), ]$with_constant
+      
+      vol_forecast <- 0
+      
+      if (with_constant) {
+          arch08=garch(arima_res,order=c(p,q),trace=F)
+          spec <- ugarchspec(variance.model = list(model = "sGARCH", garchOrder = c(p, q)),
+                              mean.model     = list(armaOrder = c(0, 0), include.mean = FALSE),
+                              distribution.model = "norm")
+          garch_fit <- ugarchfit(spec, arima_res)
+          garch_forecast <- ugarchforecast(garch_fit, n.ahead = days_ahead)
+          vol_forecast <- garch_forecast@forecast$sigmaFor
+      } else {
+          arch08=garch(arima_res-mean(arima_res),order=c(p,q),trace=F)
+          spec <- ugarchspec(variance.model = list(model = "sGARCH", garchOrder = c(p, q)),
+                              mean.model     = list(armaOrder = c(0, 0), include.mean = FALSE),
+                              distribution.model = "norm")
+          garch_fit <- ugarchfit(spec, arima_res-mean(arima_res))
+          garch_forecast <- ugarchforecast(garch_fit, n.ahead = days_ahead)
+          vol_forecast <- garch_forecast@forecast$sigmaFor
+      }
+      
+     
+      # print(forecasted_volatility)
+      arima_forecast=forecast(fit,days_ahead,level=95) 
+      
+      
+      arima_point_forecast <- as.numeric(arima_forecast$mean )
+      
+      random_shocks <- vol_forecast * rnorm (days_ahead)
+      final_forecasted_prices <- arima_point_forecast + random_shocks
+      
+      forecasted_prices <- c(forecasted_prices, final_forecasted_prices)
+      forecasted_volatilities <- c(forecasted_volatilities, vol_forecast)
+
+      
+  }
+  return(list(prices = forecasted_prices, volatilities = forecasted_volatilities))
+}
+```
+
+```{r}
+res = arima_garch_prediction(log(qqq_close), 5, 1)
+prices = res[1]
+vol = res[2]
+```
+
+```{r}
+print(vol)
+```
+
+```{r}
+print(exp(final_forecasted_prices))
+
+```
+
+```{r}
+print(test_data)
+```
+
+```{r}
+plot(exp(final_forecasted_prices))
+```
+
+```{r}
+plot(exp(test_data))
+```

@@ -1,0 +1,395 @@
+---
+title: "Return Forecasting with Time Series"
+author: "Moinak Nath"
+date: "2025-03-28"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## 1. Importing the Data
+
+```{r}
+# library(quantmod)
+# #getSymbols("QQQ", src = "yahoo")
+# getSymbols("QQQ", src = "yahoo", from = "2021-03-27", to = "2025-03-27")
+# qqq_close <- Cl(QQQ)             # Extracts the closing prices (still an xts object)
+# qqq_close_array <- coredata(qqq_close)  # Converts it to a numeric vector/array
+# #print(qqq_close_array)
+# #qqq_subset <- QQQ["2020-01-01/2020-12-31"]
+
+```
+
+```{r}
+# Plot QQQ price
+# Load necessary package
+library(quantmod)
+
+# Define the date range
+start_date <- "2020-03-27"
+end_date   <- "2025-03-26"
+
+# Get QQQ data from Yahoo Finance for the specified date range
+getSymbols("QQQ", src = "yahoo", from = start_date, to = end_date)
+
+# Plot the QQQ closing prices using chartSeries
+chartSeries(QQQ, subset = paste0(start_date, "/", end_date),
+            theme = chartTheme("white"),
+            type = "line",
+            name = "QQQ Closing Prices")
+
+
+
+```
+
+```{r}
+install.packages("PerformanceAnalytics")
+
+```
+
+```{r}
+library(PerformanceAnalytics)
+
+# Compute daily returns using closing prices
+qqq_returns <- dailyReturn(Cl(QQQ))
+
+# Store returns in an array (numeric vector)
+qqq_returns_array <- coredata(qqq_returns)
+
+# Plot the returns using PerformanceAnalytics chart
+plot(qqq_returns, main = "QQQ Daily Returns", col = "blue", type = "l")
+
+chartSeries(qqq_returns, theme = chartTheme("white"), type = "line", name = "QQQ Daily Returns")
+
+# Alternatively, you can use the base plot function:
+# plot(qqq_returns, main = "QQQ Daily Returns", col = "blue", type = "l")
+
+```
+
+```{r}
+print(qqq_returns)
+```
+
+```{r}
+# # Compute the 10-day moving average of the returns
+# qqq_returns_ma10 <- SMA(qqq_returns, n = 5)
+# 
+# # Plot the daily returns and overlay the 10-day moving average
+# plot(qqq_returns, main = "QQQ Daily Returns with 10-Day Moving Average",
+#      col = "gray", type = "l", ylab = "Return", xlab = "Date")
+# lines(qqq_returns_ma10, col = "blue", lwd = 2)
+# legend("topright", legend = c("Daily Returns", "10-Day MA"), 
+#        col = c("gray", "blue"), lty = 1, lwd = c(1, 2))
+
+```
+
+```{r}
+print(length(qqq_returns))
+```
+
+```{r}
+library(quantmod)
+library(PerformanceAnalytics)
+library(rugarch)
+
+
+# ------------------------------
+# Fit ARMA-GARCH model on the entire returns data (or last 60 days if needed)
+# ------------------------------
+
+# For illustration, we use the full data here; to use only the last 60 days:
+# qqq_returns_subset <- tail(qqq_returns, 60)
+# For now, we'll fit on qqq_returns:
+spec <- ugarchspec(
+  variance.model = list(model = "sGARCH", garchOrder = c(1, 1)),
+  mean.model     = list(armaOrder = c(1, 0), include.mean = TRUE),
+  distribution.model = "norm"
+)
+
+fit <- ugarchfit(spec, data = qqq_returns)
+
+# Forecast 1-step ahead (i.e. predict next period's return)
+forecast <- ugarchforecast(fit, n.ahead = 1)
+predicted_return <- as.numeric(fitted(forecast))
+print("Predicted Return:")
+print(predicted_return)
+
+
+
+
+```
+
+```{r}
+
+# Get the dates from the returns xts object and add the predicted date
+dates <- index(qqq_returns)
+pred_date <- dates[length(dates)] + 1   # Next day after the last observation
+cat("prediction_date:", pred_date, "\n")
+x <- c(dates, pred_date)
+
+# Get the returns values and add the predicted return at the end
+y <- c(coredata(qqq_returns), predicted_return)
+
+# ------------------------------
+# Plot the data using the x and y vectors
+# ------------------------------
+
+# Adjust y-axis range to ensure the predicted value is visible
+ymin <- min(y)
+ymax <- max(y)
+
+# Plot the returns (line plot) using the created x and y vectors
+plot(x, y, type = "l", col = "blue", lwd = 2,
+     main = "QQQ Returns with Forecast",
+     xlab = "Date", ylab = "Return",
+     ylim = c(ymin, ymax))
+
+# Add the forecasted point (in red)
+points(pred_date, predicted_return, col = "red", pch = 19, cex = 2)
+text(pred_date, predicted_return, labels = round(predicted_return, 4),
+     pos = 3, col = "red")
+
+# Add a legend for clarity
+legend("topright", legend = c("Actual Returns", "Forecasted Return"),
+       col = c("blue", "red"), lty = c(1, NA), pch = c(NA, 19))
+
+```
+
+```{r}
+# Open a new graphics window with custom dimensions (width and height in inches)
+dev.new(width = 12, height = 20)
+
+# Plot using the x and y vectors; suppress the default x-axis
+plot(x, y, type = "l", col = "blue", lwd = 2,
+     main = "QQQ Returns with Forecast",
+     xlab = "Date", ylab = "Return",
+     ylim = c(ymin, .05),
+     xaxt = "n")
+
+# Create a sequence of dates for the x-axis ticks (adjust the by argument for desired tick frequency)
+x_ticks <- seq(from = min(x), to = max(x), by = "7 day")
+axis.Date(1, at = x_ticks, format = "%Y-%m-%d", las = 2, cex.axis = .8)
+
+# Optionally, add y-axis ticks (default is usually fine, but you can customize if desired)
+axis(2)
+
+# Add grid lines across the plot
+grid(nx = NULL, ny = NULL, col = "gray", lty = "dotted")
+
+# Overlay the forecasted point as a red point and add a text label
+points(pred_date, predicted_return, col = "red", pch = 19, cex = 2)
+text(pred_date, predicted_return, labels = round(predicted_return, 4),
+     pos = 3, col = "red")
+
+# Add a legend
+legend("topright", legend = c("Actual Returns", "Forecasted Return"),
+       col = c("blue", "red"), lty = c(1, NA), pch = c(NA, 19))
+
+```
+
+2025-03-26 -.018
+
+```{r}
+install.packages("forecast")
+```
+
+```{r}
+library(forecast)
+
+# Fit an ARIMA model using auto.arima (it selects the best orders automatically)
+fit <- auto.arima(qqq_returns)
+
+# Print the model; you'll see the AICc reported in the output.
+print(fit)
+
+# Alternatively, extract the AICc value directly:
+print(paste("AICc:", fit$aicc))
+
+
+```
+
+```{r}
+qqq_close <- Cl(QQQ)  
+log_diff = diff(log(qqq_close))
+plot(log_diff,type='l',main='Difference Log QQQ')
+```
+
+```{r}
+library(forecast)
+
+# Fit an ARIMA model using auto.arima (it selects the best orders automatically)
+fit <- auto.arima(log(qqq_close))
+
+# Print the model; you'll see the AICc reported in the output.
+print(fit)
+
+# Alternatively, extract the AICc value directly:
+print(paste("AICc:", fit$aicc))
+
+arima_res <- fit$res
+```
+
+```{r}
+library(tseries)
+
+# Assume res.arima212 is available.
+# If not, for demonstration, you could simulate data:
+# set.seed(123)
+# res.arima212 <- rnorm(200)
+
+# Initialize a data frame to store the results
+results <- data.frame(p = numeric(),
+                      q = numeric(),
+                      with_constant = logical(),
+                      AIC = numeric(),
+                      AICc = numeric(),
+                      stringsAsFactors = FALSE)
+
+# Loop over the two choices for p and q, and for constant vs. no constant.
+for (p in c(0, 2)) {
+  for (q in c(0, 8)) {
+    for (with_const in c(TRUE, FALSE)) {
+      # If with_const is FALSE, subtract the mean to force the constant to zero.
+      if (with_const) {
+        x_fit <- arima_res
+      } else {
+        x_fit <- arima_res - mean(arima_res)
+      }
+      
+      # Fit the GARCH model using the built-in garch() function.
+      # Use try() to skip over any model that fails to converge.
+      fit_model <- try(garch(x_fit, order = c(p, q), trace = FALSE), silent = TRUE)
+      if (inherits(fit_model, "try-error")) {
+        next
+      }
+      
+      # Compute AIC from the fitted model
+      model_aic <- AIC(fit_model)
+      
+      # Number of estimated parameters in the model
+      # Coefficients are stored in fit_model$coef.
+      k <- length(fit_model$coef)
+      
+      # Number of observations
+      n <- length(x_fit)
+      
+      # Compute AICc manually using the formula:
+      model_aicc <- model_aic + (2 * k * (k + 1)) / (n - k - 1)
+      
+      # Append results to our data frame
+      results <- rbind(results, data.frame(p = p,
+                                           q = q,
+                                           with_constant = with_const,
+                                           AIC = model_aic,
+                                           AICc = model_aicc))
+    }
+  }
+}
+
+# Print the results for comparison
+print(results)
+best_model <- results[which.min(results$AIC), ]
+print(best_model)
+```
+
+```{r}
+arch08=garch(arima_res- mean(arima_res),order=c(0,8),trace=F)
+summary(arch08)
+```
+
+```{r}
+forecast411step1=forecast(fit,1,level=95)
+forecast411=forecast(fit,100,level=95) 
+plot(forecast411)
+
+ht.arch08=arch08$fit[,1]^2 #use 1st column of fit
+plot(ht.arch08,main='Conditional variances')
+
+fit411=fitted.values(fit)
+
+low=fit411-1.96*sqrt(ht.arch08)
+high=fit411+1.96*sqrt(ht.arch08)
+print(high)
+print(length(log(qqq_close)))
+
+plot(log(qqq_close),type='l',main='Log QQQ,Low,High')
+lines(low,col='red')
+lines(high,col='blue')
+```
+
+```{r}
+# Assume that fit411, low, and high correspond to the same dates as qqq_returns.
+dates_fit <- index(qqq_returns)
+
+# Convert low and high into xts objects
+low_xts  <- xts(low, order.by = dates_fit)
+high_xts <- xts(high, order.by = dates_fit)
+print(low_xts)
+
+# Plot returns (or fitted returns) and overlay low and high
+plot(log(qqq_close), type='l', main='QQQ Returns: Fitted, Low, and High')
+lines(low_xts, col='red')
+lines(high_xts, col='blue')
+
+```
+
+```{r}
+library(quantmod)
+library(rugarch)
+library(xts)
+
+# Assume qqq_returns is your training return series (an xts object).
+# For example, you might have created it with:
+# qqq_returns <- dailyReturn(Cl(QQQ))
+
+# Define and fit the ARIMA-GARCH model (example: ARMA(1,0) + GARCH(1,1))
+spec <- ugarchspec(
+  variance.model = list(model = "sGARCH", garchOrder = c(1, 1)),
+  mean.model     = list(armaOrder = c(1, 0), include.mean = TRUE),
+  distribution.model = "norm"
+)
+fit <- ugarchfit(spec, data = log(qqq_returns))
+
+# Forecast 1 step ahead (i.e., predict the next day)
+forecast1 <- ugarchforecast(fit, n.ahead = 1)
+pred_return <- as.numeric(fitted(forecast1))
+pred_sigma  <- as.numeric(sigma(forecast1))
+
+# Compute the 95% confidence interval for the forecast:
+lower_bound <- pred_return - 1.96 * pred_sigma
+upper_bound <- pred_return + 1.96 * pred_sigma
+
+# Determine the prediction date (one day after the last date in the training data)
+pred_date <- index(qqq_returns)[length(qqq_returns)] + 1
+
+# Print the forecast details
+print(paste("Next day predicted return:", round(pred_return, 4)))
+print(paste("95% CI: [", round(lower_bound, 4), ",", round(upper_bound, 4), "]"))
+
+# ------------------------------
+# Plotting the training data and next-day forecast with confidence band
+# ------------------------------
+
+# Plot the training returns
+plot(qqq_returns, main = "QQQ Returns with Next-Day Forecast Confidence Band",
+     xlab = "Date", ylab = "Return", col = "blue", type = "l")
+
+# Add the forecasted return as a red point
+points(pred_date, pred_return, col = "red", pch = 19, cex = 1.5)
+
+# Add the confidence interval points (using green symbols)
+points(pred_date, lower_bound, col = "green", pch = 4, cex = 1.5)
+points(pred_date, upper_bound, col = "green", pch = 4, cex = 1.5)
+
+# Optionally, add horizontal dashed lines at the lower and upper bounds for clarity
+abline(h = lower_bound, col = "green", lty = 2)
+abline(h = upper_bound, col = "green", lty = 2)
+
+# Add a legend to identify the elements in the plot
+legend("topright", legend = c("Training Data", "Forecast", "95% Confidence Bounds"),
+       col = c("blue", "red", "green"), lty = c(1, NA, 2), pch = c(NA, 19, 4))
+
+
+```
