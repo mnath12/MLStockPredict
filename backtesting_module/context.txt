@@ -1,0 +1,53 @@
+# Context: backtesting_module (as of latest changes)
+
+## Overview
+A modular Python backtesting engine for stock and option strategies, supporting delta-hedging and user-driven workflows. The system is designed for extensibility, with clear separation of data handling, portfolio management, execution, and strategy logic.
+
+## Key Features
+- User selects stock, date range, frequency, and option contract (with filters for strike and expiry).
+- Fetches and aligns stock and option time series from Alpaca and Polygon APIs.
+- Ranks and displays top 20 option contracts by available data (parallelized for speed).
+- Initializes a delta-hedged portfolio: long 1 call option, short enough stock to be delta-neutral.
+- Main loop: at each time step, rebalances stock position to maintain delta-neutrality using GreeksEngine.
+- Tracks and prints total return and Sharpe ratio at the end of the backtest.
+- Colorful terminal output and user-friendly prompts.
+
+## Main Workflow (main.py)
+1. Prompt user for API keys, stock, date range, frequency.
+2. Fetch stock and option time series.
+3. Optionally filter options by strike and expiry.
+4. Rank options by available data (parallelized).
+5. User selects an option contract.
+6. Initialize portfolio (long call, short stock for delta-neutrality).
+7. For each time step:
+   - Compute option delta (GreeksEngine)
+   - Adjust stock position to keep portfolio delta ≈ 0
+   - Update portfolio value
+8. At end, print total return and Sharpe ratio.
+
+## Key Files and Classes
+- main.py: Main workflow, user interaction, and backtest loop.
+- data_handler.py: DataHandler class for fetching stock/option data from Alpaca/Polygon.
+- greeks_engine.py: GreeksEngine class for computing option Greeks (uses QuantLib if available).
+- portfolio.py: Portfolio class for tracking positions, cash, P&L, and metrics.
+- position_sizer.py: PositionSizer class for converting targets to orders.
+- execution_handler.py: ExecutionHandler class for simulating order fills.
+- strategy.py: BaseStrategy and mixins (delta-hedging, etc.).
+- entities.py: Data classes for Order, Fill, Position, Option, Stock.
+
+## Notable Implementation Details
+- Option ticker parsing is robust (handles O: prefix, variable-length underlyings).
+- Timezone handling is robust (expiry and timestamps are UTC-aware).
+- Parallelization uses ThreadPoolExecutor (default 8 workers) for option data ranking.
+- Sharpe ratio and return are calculated using daily P&L and portfolio values.
+
+## How to Run
+From the project root:
+
+    python -m backtesting_module.main
+
+## Next Steps / TODOs
+- Add more strategies (e.g., RL, LSTM, jump diffusion).
+- Add plotting/visualization of results.
+- Add more robust error handling and logging.
+- Integrate with real API keys for live data. 
