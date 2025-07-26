@@ -18,8 +18,6 @@ __all__ = [
     "DeltaHedgingMixin",
     "DeltaGammaHedgingMixin",
     "LSTMStrategy",
-    "LSTMVolatilityStrategy",
-    "LSTMVolatilityDeltaHedgedStrategy",
     "Order",
     "Fill",
     "Position",

@@ -67,7 +67,7 @@ def parse_option_ticker(ticker):
     if not m:
         raise ValueError(f"Could not parse option ticker: {ticker}")
     underlying, date_part, opt_type, strike_part = m.groups()
-    expiry = pd.to_datetime(f"20{date_part}", format='%Y%m%d').tz_localize('UTC')
+    expiry = pd.to_datetime(f"20{date_part}", format='%Y%m%d')
     strike = float(strike_part) / 1000.0
     return underlying, expiry, opt_type.lower(), strike
 
