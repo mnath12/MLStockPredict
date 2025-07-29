@@ -1,0 +1,13 @@
+numpy>=1.23
+pandas>=1.5
+scipy>=1.10
+scikit-learn>=1.2
+matplotlib>=3.7
+seaborn>=0.12
+plotly>=5.15
+py_vollib>=1.0
+fredapi>=0.5
+alpaca-py>=0.13
+polygon-api-client>=1.11
+jupyter 
+pandas_market_calendars>=4.3 

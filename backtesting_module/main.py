@@ -14,6 +14,11 @@ Key Features:
     - This dramatically speeds up the process of finding the top 20 most active/liquid contracts, making the workflow much more responsive for the user.
     - The number of parallel workers is set to 8 by default, balancing speed and API rate limits.
 - User selects from the top 20 contracts with the most data, reducing the chance of picking illiquid or inactive options.
+- **Dynamic risk-free rate from FRED:**
+    - Fetches real-time risk-free rates from Federal Reserve Economic Data (FRED)
+    - Uses 3-Month Treasury Bill rate (DGS3MO) as the risk-free rate
+    - Falls back to 10-Year Treasury rate (DGS10) if 3-month data unavailable
+    - Provides fallback to default rate if FRED API fails
 
 (Backtest execution is stubbed out as requested.)
 """
@@ -34,6 +39,63 @@ from backtesting_module import (
 )
 from backtesting_module.strategy import BuyAndHoldStrategy
 from backtesting_module.data_handler import DataHandler
+from backtesting_module.volatility_forecaster import VolatilityForecaster
+
+def get_risk_free_rate_from_fred(fred_api_key: Optional[str] = None, fallback_rate: float = 0.02) -> float:
+    """
+    Fetch the current risk-free rate from FRED.
+    
+    Args:
+        fred_api_key: FRED API key (32 characters)
+        fallback_rate: Rate to use if FRED API fails (default: 2%)
+    
+    Returns:
+        float: Current risk-free rate as a decimal (e.g., 0.05 for 5%)
+    """
+    if not fred_api_key:
+        print(f"Warning: No FRED API key provided. Using fallback rate: {fallback_rate*100:.1f}%")
+        return fallback_rate
+    
+    try:
+        from fredapi import Fred
+        fred = Fred(api_key=fred_api_key)
+        
+        # Try 3-Month Treasury Bill rate first (most commonly used for short-term options)
+        try:
+            dgs3mo = fred.get_series('DGS3MO')
+            if not dgs3mo.empty:
+                latest_rate = dgs3mo.iloc[-1]
+                if not pd.isna(latest_rate):
+                    rate = latest_rate / 100.0  # Convert from percentage to decimal
+                    print(f"Using 3-Month Treasury Bill rate: {rate*100:.2f}%")
+                    return rate
+        except Exception as e:
+            print(f"Could not fetch 3-Month Treasury rate: {e}")
+        
+        # Fallback to 10-Year Treasury rate
+        try:
+            dgs10 = fred.get_series('DGS10')
+            if not dgs10.empty:
+                latest_rate = dgs10.iloc[-1]
+                if not pd.isna(latest_rate):
+                    rate = latest_rate / 100.0  # Convert from percentage to decimal
+                    print(f"Using 10-Year Treasury rate: {rate*100:.2f}%")
+                    return rate
+        except Exception as e:
+            print(f"Could not fetch 10-Year Treasury rate: {e}")
+        
+        # If both fail, use fallback rate
+        print(f"Could not fetch rates from FRED. Using fallback rate: {fallback_rate*100:.1f}%")
+        return fallback_rate
+        
+    except ImportError:
+        print("fredapi package not installed. Install with: pip install fredapi")
+        print(f"Using fallback rate: {fallback_rate*100:.1f}%")
+        return fallback_rate
+    except Exception as e:
+        print(f"Error fetching risk-free rate from FRED: {e}")
+        print(f"Using fallback rate: {fallback_rate*100:.1f}%")
+        return fallback_rate
 
 def parse_freq(freq: str):
     # Remove spaces and lowercase
@@ -67,9 +129,65 @@ def parse_option_ticker(ticker):
     if not m:
         raise ValueError(f"Could not parse option ticker: {ticker}")
     underlying, date_part, opt_type, strike_part = m.groups()
-    expiry = pd.to_datetime(f"20{date_part}", format='%Y%m%d')
+    expiry = pd.to_datetime(f"20{date_part}", format='%Y%m%d').tz_localize('UTC')
     strike = float(strike_part) / 1000.0
-    return underlying, expiry, opt_type.lower(), strike
+    
+    # Convert option type to full name
+    if opt_type.upper() == 'C':
+        opt_type = 'call'
+    elif opt_type.upper() == 'P':
+        opt_type = 'put'
+    else:
+        raise ValueError(f"Invalid option type: {opt_type}")
+    
+    return underlying, expiry, opt_type, strike
+
+def should_rebalance(current_timestamp: pd.Timestamp, last_rebalance_date: Optional[pd.Timestamp], 
+                    rebalancing_freq: str, current_delta: Optional[float] = None, 
+                    target_delta: float = 0.0, delta_threshold: float = 0.05) -> bool:
+    """
+    Determine if we should rebalance based on the rebalancing frequency and delta threshold.
+    
+    Args:
+        current_timestamp: Current timestamp
+        last_rebalance_date: Last rebalancing date (None if first time)
+        rebalancing_freq: Rebalancing frequency ("daily", "weekly", "monthly", "every_bar")
+        current_delta: Current portfolio delta
+        target_delta: Target portfolio delta (usually 0 for delta-neutral)
+        delta_threshold: Minimum delta deviation to trigger rebalancing
+        
+    Returns:
+        bool: True if we should rebalance
+    """
+    # Always rebalance on first run
+    if last_rebalance_date is None:
+        return True
+    
+    # Check frequency-based rebalancing
+    frequency_check = False
+    current_date = current_timestamp.date()
+    last_date = last_rebalance_date.date()
+    
+    if rebalancing_freq == "every_bar":
+        frequency_check = True
+    elif rebalancing_freq == "daily":
+        frequency_check = current_date > last_date
+    elif rebalancing_freq == "weekly":
+        # Check if we've moved to a new week
+        current_week = current_date.isocalendar()[1]
+        last_week = last_date.isocalendar()[1]
+        frequency_check = current_week > last_week
+    elif rebalancing_freq == "monthly":
+        # Check if we've moved to a new month
+        frequency_check = (current_date.year > last_date.year) or \
+                         (current_date.year == last_date.year and current_date.month > last_date.month)
+    
+    # If frequency check passes, also check delta threshold
+    if frequency_check and current_delta is not None:
+        delta_deviation = abs(current_delta - target_delta)
+        return delta_deviation >= delta_threshold
+    
+    return frequency_check
 
 class BacktestEngine:
     """
@@ -104,6 +222,9 @@ class BacktestEngine:
         print("STARTING MAIN BACKTESTING LOOP")
         print("="*50)
 
+        if self.big_df is None:
+            raise ValueError("No data loaded for backtesting")
+        
         total_bars = len(self.big_df)
         print(f"Processing {total_bars} bars...")
 
@@ -112,11 +233,13 @@ class BacktestEngine:
             greeks_data = self._calculate_greeks(market_data, timestamp)
             market_data.update(greeks_data)
             current_prices = {k: v for k, v in market_data.items() if not k.endswith(('_delta', '_gamma', '_vega', '_theta', '_rho'))}
-            self.portfolio.update_portfolio_value(current_prices, timestamp)
+            self.portfolio.update_portfolio_value(current_prices, pd.Timestamp(timestamp))
             portfolio_view = self.portfolio.portfolio_view()
+            if self.strategy is None:
+                raise ValueError("No strategy loaded for backtesting")
             targets = self.strategy.on_bar(self.big_df, i, portfolio_view, market_data)
             if targets:
-                orders = self.position_sizer.get_orders(targets, self.portfolio, timestamp)
+                orders = self.position_sizer.get_orders(targets, self.portfolio, pd.Timestamp(timestamp))
                 if orders:
                     fills = self.execution_handler.get_fills(orders, current_prices)
                     for fill in fills:
@@ -127,10 +250,11 @@ class BacktestEngine:
     def _extract_market_data(self, row: pd.Series) -> Dict[str, float]:
         market_data = {}
         for col in row.index:
-            if isinstance(row[col], (float, int)) and not pd.isna(row[col]):
+            value = row[col]
+            if isinstance(value, (float, int)) and not pd.isna(value):
                 if isinstance(col, str) and col.endswith('_close'):
                     symbol = col.replace('_close', '')
-                    market_data[symbol] = float(row[col])
+                    market_data[symbol] = float(value)
         return market_data
 
     def _calculate_greeks(self, market_data: Dict[str, float], timestamp: Any) -> Dict[str, float]:
@@ -143,6 +267,12 @@ def main():
     alpaca_key = input("Enter Alpaca API key (or leave blank): ").strip()
     alpaca_secret = input("Enter Alpaca API secret (or leave blank): ").strip()
     polygon_key = input("Enter Polygon API key (or leave blank): ").strip()
+    fred_key = input("Enter FRED API key (or leave blank for fallback rate): ").strip()
+
+    # Get risk-free rate from FRED
+    print("\nFetching current risk-free rate...")
+    r = get_risk_free_rate_from_fred(fred_key)
+    print(f"Risk-free rate: {r*100:.2f}%\n")
 
     data_handler = DataHandler(
         alpaca_api_key="PKCLL4TXCDLRN76OGRAB",
@@ -152,6 +282,12 @@ def main():
     # Prompt user for stock, date, and frequency
     symbol = input("Enter stock symbol (e.g., AAPL): ").strip().upper()
     today_str = datetime.today().strftime("%Y-%m-%d")
+    
+    # Calculate earliest available date (2 years ago for Polygon options data)
+    earliest_date = (datetime.today() - timedelta(days=2*365)).strftime("%Y-%m-%d")
+    print(f"\n📅 Polygon has 2 years of historical options data")
+    print(f"   Earliest available date: {earliest_date}")
+    
     start_date = input(f"Enter start date (YYYY-MM-DD) [default: {today_str}]: ").strip()
     if not start_date:
         start_date = today_str
@@ -161,11 +297,159 @@ def main():
     freq = input("Enter frequency (e.g., 1D, 5Min) [default: 1D]: ").strip()
     if not freq:
         freq = "1D"
+    
+    # Rebalancing frequency setup
+    print("\n⚖️ Rebalancing Frequency Setup:")
+    print("1. Daily rebalancing (recommended)")
+    print("2. Weekly rebalancing")
+    print("3. Monthly rebalancing")
+    print("4. Every bar (high frequency)")
+    
+    rebal_choice = input("Choose rebalancing frequency (1/2/3/4) [default: 1]: ").strip()
+    if not rebal_choice:
+        rebal_choice = "1"
+    
+    # Map choice to rebalancing frequency
+    rebalancing_freq_map = {
+        "1": "daily",
+        "2": "weekly", 
+        "3": "monthly",
+        "4": "every_bar"
+    }
+    rebalancing_freq = rebalancing_freq_map.get(rebal_choice, "daily")
+    print(f"Using {rebalancing_freq} rebalancing")
+    
+    # Delta threshold setup
+    print("\n🎯 Delta Threshold Setup:")
+    print("Only rebalance when portfolio delta deviates from target by this amount")
+    delta_threshold_input = input("Enter delta threshold (0.01-0.10) [default: 0.05]: ").strip()
+    if not delta_threshold_input:
+        delta_threshold = 0.05
+    else:
+        try:
+            delta_threshold = float(delta_threshold_input)
+            delta_threshold = max(0.01, min(0.10, delta_threshold))  # Clamp between 0.01 and 0.10
+        except ValueError:
+            delta_threshold = 0.05
+            print("Invalid input, using default threshold of 0.05")
+    
+    print(f"Using delta threshold: {delta_threshold}")
+    
+    # Volatility forecasting setup (simplified)
+    print("\n🔮 Volatility Forecasting Setup:")
+    print("1. Use local model from volatility_models folder")
+    print("2. Use fallback method (exponentially weighted)")
+    
+    vol_choice = input("Choose volatility forecasting method (1/2) [default: 2]: ").strip()
+    if not vol_choice:
+        vol_choice = "2"
+    
+    volatility_forecaster = None
+    
+    if vol_choice == "1":
+        # Local model from volatility_models folder
+        import os
+        volatility_models_dir = "volatility_models"
+        
+        # Create directory if it doesn't exist
+        if not os.path.exists(volatility_models_dir):
+            os.makedirs(volatility_models_dir)
+            print(f"Created {volatility_models_dir} directory")
+        
+        # List available models
+        model_files = []
+        if os.path.exists(volatility_models_dir):
+            for file in os.listdir(volatility_models_dir):
+                if file.endswith(('.pkl', '.h5', '.keras', '.json')):
+                    model_files.append(file)
+        
+        if model_files:
+            print(f"\nAvailable models in {volatility_models_dir}/:")
+            for i, model_file in enumerate(model_files):
+                print(f"  {i+1}: {model_file}")
+            
+            model_choice = input(f"Select model (1-{len(model_files)}) or press Enter to skip: ").strip()
+            if model_choice and model_choice.isdigit():
+                model_idx = int(model_choice) - 1
+                if 0 <= model_idx < len(model_files):
+                    model_path = os.path.join(volatility_models_dir, model_files[model_idx])
+                    print(f"Loading model: {model_path}")
+                    
+                    try:
+                        volatility_forecaster = VolatilityForecaster(model_path=model_path, fallback_method="ewm")
+                        print("✓ Model loaded successfully")
+                    except Exception as e:
+                        print(f"✗ Could not load model: {e}")
+                        print("Falling back to EWMA method")
+                        volatility_forecaster = VolatilityForecaster(fallback_method="ewm")
+                        use_batch_predictions = False
+                    
+                    # Batch prediction setup
+                    print("\n📊 Batch Prediction Setup:")
+                    print("1. Individual predictions (current method)")
+                    print("2. Batch predictions (more efficient)")
+                    
+                    batch_choice = input("Choose prediction method (1/2) [default: 1]: ").strip()
+                    if not batch_choice:
+                        batch_choice = "1"
+                    
+                    use_batch_predictions = (batch_choice == "2")
+                    
+                    if use_batch_predictions:
+                        print("Using batch predictions for efficiency")
+                        # Note: Batch predictions will be computed after stock data is loaded
+                        # This will be handled later in the code
+                        print("Batch predictions will be computed after data loading...")
+                    
+                else:
+                    print("Invalid selection, using fallback method")
+                    volatility_forecaster = VolatilityForecaster(fallback_method="ewm")
+                    use_batch_predictions = False
+            else:
+                print("No model selected, using fallback method")
+                volatility_forecaster = VolatilityForecaster(fallback_method="ewm")
+                use_batch_predictions = False
+        else:
+            print(f"No model files found in {volatility_models_dir}/")
+            print("Please place your trained model files (.pkl, .h5, .keras, .json) in the volatility_models folder")
+            print("Using fallback method for now")
+            volatility_forecaster = VolatilityForecaster(fallback_method="ewm")
+            use_batch_predictions = False
+    
+    else:
+        # Fallback method
+        print("Using fallback volatility estimation (exponentially weighted)")
+        volatility_forecaster = VolatilityForecaster(fallback_method="ewm")
+        use_batch_predictions = False
 
     # Fetch and print stock time series
     stock_df = data_handler.get_stock_bars(symbol, start_date, end_date, freq)
     print(f"\nStock time series for {symbol} from {start_date} to {end_date} (freq={freq}):")
     print(stock_df)
+
+    # Compute batch volatility forecasts if requested
+    volatility_forecasts = {}
+    if use_batch_predictions:
+        print("\n📊 Computing batch volatility forecasts...")
+        # Pre-compute volatility forecasts for the entire period
+        all_dates = stock_df.index.unique()
+        
+        for i, date in enumerate(all_dates):
+            if i % 100 == 0:  # Progress indicator
+                print(f"  Processing date {i+1}/{len(all_dates)}")
+            
+            # Get price data up to this date
+            price_data_up_to_date = stock_df['close'].loc[:date]
+            if len(price_data_up_to_date) > 0:
+                try:
+                    vol_forecast = volatility_forecaster.forecast_volatility(price_data_up_to_date, date)
+                    volatility_forecasts[date] = vol_forecast
+                except Exception as e:
+                    print(f"Warning: Could not forecast volatility for {date}: {e}")
+                    # Use fallback
+                    volatility_forecasts[date] = volatility_forecaster._fallback_forecast(price_data_up_to_date)
+        
+        print(f"✓ Pre-computed {len(volatility_forecasts)} volatility forecasts")
 
     # Display current price of the stock
     if not stock_df.empty:
@@ -246,103 +530,479 @@ def main():
 
     print(f"\033[1;36mCurrent price of {symbol}: {last_price:.2f}\033[0m" if last_price is not None else "")
 
-    opt_idx = int(input("Select an option by number: "))
-    option_ticker = top_options[opt_idx][0]
+    # Separate calls and puts
+    calls = []
+    puts = []
+    for opt, count in top_options:
+        if opt.endswith('C'):
+            calls.append((opt, count))
+        elif opt.endswith('P'):
+            puts.append((opt, count))
 
-    # Fetch and print option time series
-    option_df = data_handler.get_option_aggregates(option_ticker, start_date, end_date, timespan, multiplier)
-    print(f"\nOption time series for {option_ticker} from {start_date} to {end_date} (freq={freq}):")
-    print(option_df)
+    print(f"\n📞 Available CALL options:")
+    for idx, (opt, count) in enumerate(calls[:10]):  # Show top 10 calls
+        print(f"  {idx}: {opt} (bars: {count})")
 
-    # Align stock and option data on timestamps
-    combined_df = stock_df[['close']].rename(columns={'close': f'{symbol}_close'})
-    combined_df = combined_df.join(option_df[['close']].rename(columns={'close': f'{option_ticker}_close'}), how='inner')
+    print(f"\n📞 Available PUT options:")
+    for idx, (opt, count) in enumerate(puts[:10]):  # Show top 10 puts
+        print(f"  {idx}: {opt} (bars: {count})")
+
+    # Select call option
+    call_idx = int(input(f"\nSelect a CALL option (0-{len(calls)-1}): "))
+    if call_idx < 0 or call_idx >= len(calls):
+        print("Invalid call selection. Exiting.")
+        return
+    call_ticker = calls[call_idx][0]
+
+    # Select put option
+    put_idx = int(input(f"Select a PUT option (0-{len(puts)-1}): "))
+    if put_idx < 0 or put_idx >= len(puts):
+        print("Invalid put selection. Exiting.")
+        return
+    put_ticker = puts[put_idx][0]
+
+    print(f"\nSelected straddle:")
+    print(f"  Call: {call_ticker}")
+    print(f"  Put:  {put_ticker}")
+    
+    # For now, we'll use the call ticker as the primary option for data fetching
+    # In a full implementation, we'd fetch both call and put data
+    option_ticker = call_ticker
+
+    # Fetch and print option time series for both call and put
+    call_df = data_handler.get_option_aggregates(call_ticker, start_date, end_date, timespan, multiplier)
+    put_df = data_handler.get_option_aggregates(put_ticker, start_date, end_date, timespan, multiplier)
+    
+    print(f"\nCall option time series for {call_ticker} from {start_date} to {end_date} (freq={freq}):")
+    print(call_df.head())
+    
+    print(f"\nPut option time series for {put_ticker} from {start_date} to {end_date} (freq={freq}):")
+    print(put_df.head())
+
+    # Align stock, call, and put data on timestamps
+    combined_df = stock_df[['close']].copy()
+    combined_df.columns = [f'{symbol}_close']
+    
+    call_close_df = call_df[['close']].copy()
+    call_close_df.columns = [f'{call_ticker}_close']
+    
+    put_close_df = put_df[['close']].copy()
+    put_close_df.columns = [f'{put_ticker}_close']
+    
+    combined_df = combined_df.join(call_close_df, how='inner')
+    combined_df = combined_df.join(put_close_df, how='inner')
     combined_df = combined_df.dropna()
+    
     if combined_df.empty:
-        print("No overlapping data between stock and option. Exiting.")
+        print("No overlapping data between stock and options. Exiting.")
         return
 
     # Initialize GreeksEngine
+    print("Initializing GreeksEngine...")
     greeks_engine = GreeksEngine()
+    
+    # Check QuantLib availability
+    helper_info = greeks_engine.helper()
+    print(f"QuantLib available: {helper_info['quantlib_available']}")
+    print(f"Pricing model: {helper_info['pricing_model']}")
 
     # Initialize Portfolio
     portfolio = Portfolio(initial_cash=100000)
 
-    # Initial positions: long 1 call, short enough stock to delta-hedge
+    # Initial positions: straddle setup
     first_row = combined_df.iloc[0]
     S0 = first_row[f'{symbol}_close']
-    # Parse strike and expiry from option_ticker
+    
+    # Parse call and put option details
     try:
-        underlying, expiry, opt_type, K = parse_option_ticker(option_ticker)
+        call_underlying, call_expiry, call_type, call_strike = parse_option_ticker(call_ticker)
+        put_underlying, put_expiry, put_type, put_strike = parse_option_ticker(put_ticker)
+        print(f"Parsed call: {call_underlying} {call_type} {call_strike} expiring {call_expiry}")
+        print(f"Parsed put:  {put_underlying} {put_type} {put_strike} expiring {put_expiry}")
     except Exception as e:
-        print(f"Could not parse option ticker for strike/expiry: {e}. Exiting.")
+        print(f"Could not parse option tickers for strike/expiry: {e}. Exiting.")
         return
+    
+    # Use the earlier expiry for time calculations
+    expiry = min(call_expiry, put_expiry)
     T0 = max((expiry - combined_df.index[0]).days / 365.0, 1/365)
-    sigma = 0.2  # Placeholder, could estimate from data
-    r = 0.02
-    # Compute initial delta
-    greeks = greeks_engine.compute(
-        symbol=option_ticker,
-        underlying_price=float(S0),
-        strike=K,
-        time_to_expiry=T0,
-        volatility=sigma,
-        risk_free_rate=r,
-        option_type=opt_type
-    )
-    option_delta = greeks['delta']
-    # Long 1 call
-    option_qty = 1
-    # Short enough stock to delta-hedge
-    stock_qty = -option_delta * 100 * option_qty
-    # Round to nearest integer
-    stock_qty = int(round(stock_qty))
+    
+    # Get initial implied volatility from both call and put prices
+    print("\n📊 Getting initial implied volatility...")
+    initial_call_price = float(first_row[f'{call_ticker}_close'])
+    initial_put_price = float(first_row[f'{put_ticker}_close'])
+    sigma_implied = 0.20  # Default fallback
+    
+    try:
+        from backtesting_module.quantlib import compute_iv_quantlib
+        
+        # Calculate days to maturity
+        days_to_maturity = max((expiry - combined_df.index[0]).days, 1)
+        
+        # Calculate implied vol from call
+        sigma_implied_call = compute_iv_quantlib(
+            spot_price=float(S0),
+            option_price=initial_call_price,
+            strike_price=call_strike,
+            days_to_maturity=days_to_maturity,
+            risk_free_rate=r,
+            option_type="call",
+            exercise_style="american",
+            tree="crr",
+            steps=1000
+        )
+        
+        # Calculate implied vol from put
+        sigma_implied_put = compute_iv_quantlib(
+            spot_price=float(S0),
+            option_price=initial_put_price,
+            strike_price=put_strike,
+            days_to_maturity=days_to_maturity,
+            risk_free_rate=r,
+            option_type="put",
+            exercise_style="american",
+            tree="crr",
+            steps=1000
+        )
+        
+        # Use average of call and put implied vol
+        sigma_implied = (sigma_implied_call + sigma_implied_put) / 2
+        print(f"   Call implied volatility: {sigma_implied_call:.4f}")
+        print(f"   Put implied volatility: {sigma_implied_put:.4f}")
+        print(f"   Average implied volatility: {sigma_implied:.4f}")
+    except Exception as e:
+        print(f"Error calculating initial implied volatility: {e}")
+        print("Using fallback volatility of 20%")
+    
+    # Get initial volatility forecast for comparison
+    print("\n📊 Getting initial volatility forecast...")
+    if use_batch_predictions:
+        # Use pre-computed forecast
+        sigma_forecast = volatility_forecasts.get(combined_df.index[0], 0.2)
+    else:
+        # Individual prediction
+        initial_price_data = stock_df['close'].loc[:combined_df.index[0]]
+        sigma_forecast = volatility_forecaster.forecast_volatility(initial_price_data, combined_df.index[0])
+    print(f"   Initial volatility forecast: {sigma_forecast:.4f}")
+    
+    # Calculate initial vol_diff signal
+    vol_diff = sigma_forecast - sigma_implied
+    print(f"   Volatility difference (forecast - implied): {vol_diff:.4f}")
+    
+    # Determine initial position based on vol_diff
+    threshold = 0.02  # 2% threshold to avoid noise trades
+    if vol_diff > threshold:
+        position_side = 1  # Long straddle
+        print(f"   Signal: LONG straddle (vol_diff > {threshold:.3f})")
+    elif vol_diff < -threshold:
+        position_side = -1  # Short straddle
+        print(f"   Signal: SHORT straddle (vol_diff < -{threshold:.3f})")
+    else:
+        position_side = 0  # No position
+        print(f"   Signal: NO POSITION (|vol_diff| <= {threshold:.3f})")
+    
+    # Compute initial Greeks for both call and put using IMPLIED volatility
+    try:
+        print(f"Computing initial Greeks for straddle using IMPLIED volatility...")
+        print(f"  S0={float(S0):.2f}, T={T0:.4f}, sigma_implied={sigma_implied:.2f}, r={r:.4f}")
+        
+        # Call Greeks
+        call_greeks = greeks_engine.compute(
+            symbol=call_ticker,
+            underlying_price=float(S0),
+            strike=call_strike,
+            time_to_expiry=T0,
+            volatility=sigma_implied,
+            risk_free_rate=r,
+            option_type="call"
+        )
+        
+        # Put Greeks
+        put_greeks = greeks_engine.compute(
+            symbol=put_ticker,
+            underlying_price=float(S0),
+            strike=put_strike,
+            time_to_expiry=T0,
+            volatility=sigma_implied,
+            risk_free_rate=r,
+            option_type="put"
+        )
+        
+        call_delta = call_greeks['delta']
+        call_vega = call_greeks['vega']
+        put_delta = put_greeks['delta']
+        put_vega = put_greeks['vega']
+        
+        # Straddle Greeks
+        straddle_delta = call_delta - put_delta  # For ATM straddle, this should be ≈ 0
+        straddle_vega = call_vega + put_vega     # Straddle vega is sum of individual vegas
+        
+        print(f"  Call delta: {call_delta:.4f}, vega: {call_vega:.4f}")
+        print(f"  Put delta: {put_delta:.4f}, vega: {put_vega:.4f}")
+        print(f"  Straddle delta: {straddle_delta:.4f}, vega: {straddle_vega:.4f}")
+        
+        if pd.isna(call_delta) or pd.isna(put_delta):
+            print("Error: Initial delta is NaN. Exiting.")
+            return
+            
+    except Exception as e:
+        print(f"Error computing initial Greeks: {e}")
+        print("This might be a QuantLib issue. Check the error details above.")
+        return
+    # Set up straddle position based on vol_diff signal
+    if position_side == 0:
+        print(f"\nNo initial position (vol_diff within threshold)")
+        call_qty = 0
+        put_qty = 0
+        stock_qty = 0
+    else:
+        # Calculate position size based on vega risk budget
+        V_vega = 1000  # Vega risk budget (can be made configurable)
+        
+        # Use actual straddle vega for position sizing
+        straddle_qty = position_side * (V_vega / straddle_vega) if straddle_vega > 0 else 0
+        
+        # Round to reasonable position size
+        straddle_qty = int(round(straddle_qty))
+        if abs(straddle_qty) > 10:  # Cap position size
+            straddle_qty = 10 if straddle_qty > 0 else -10
+        
+        # For ATM straddle: both call and put have same quantity
+        call_qty = straddle_qty
+        put_qty = straddle_qty
+        
+        # Calculate stock hedge for the straddle
+        # Use actual straddle delta for hedging
+        stock_qty = -straddle_delta * 100 * straddle_qty
+        stock_qty = int(round(stock_qty))
+        
+        print(f"\nInitial position: {position_side} straddle")
+        print(f"  Call quantity: {call_qty} {call_ticker}")
+        print(f"  Put quantity: {put_qty} {put_ticker}")
+        print(f"  Stock hedge: {stock_qty} {symbol}")
+        print(f"  Vega exposure: {straddle_qty * straddle_vega:.2f}")
+    
     # Initial fills
-    t0 = combined_df.index[0]
-    portfolio.update_with_fill(Fill(symbol=option_ticker, qty=option_qty, price=float(first_row[f'{option_ticker}_close']), timestamp=t0))
-    portfolio.update_with_fill(Fill(symbol=symbol, qty=stock_qty, price=float(first_row[f'{symbol}_close']), timestamp=t0))
-    print(f"\nInitial position: Long 1 {option_ticker}, Short {abs(stock_qty)} {symbol} (delta-hedged)")
+    t0 = pd.Timestamp(combined_df.index[0])
+    if pd.isna(t0):
+        print("Error: Invalid timestamp in data. Exiting.")
+        return
+    
+    if call_qty != 0:
+        portfolio.update_with_fill(Fill(symbol=call_ticker, qty=call_qty, price=float(first_row[f'{call_ticker}_close']), timestamp=t0))
+    if put_qty != 0:
+        portfolio.update_with_fill(Fill(symbol=put_ticker, qty=put_qty, price=float(first_row[f'{put_ticker}_close']), timestamp=t0))
+    if stock_qty != 0:
+        portfolio.update_with_fill(Fill(symbol=symbol, qty=stock_qty, price=float(first_row[f'{symbol}_close']), timestamp=t0))
 
     # Main backtest loop
+    last_rebalance_date = None
+    rebalance_count = 0
+    position_changes = 0
+    
     for i, (ts, row) in enumerate(combined_df.iterrows()):
         S = float(row[f'{symbol}_close'])
-        opt_price = float(row[f'{option_ticker}_close'])
-        ts = pd.to_datetime(ts)
-        T = max((expiry - ts).days / 365.0, 1/365)
-        greeks = greeks_engine.compute(
-            symbol=option_ticker,
-            underlying_price=S,
-            strike=K,
-            time_to_expiry=T,
-            volatility=sigma,
-            risk_free_rate=r,
-            option_type=opt_type
+        call_price = float(row[f'{call_ticker}_close'])
+        put_price = float(row[f'{put_ticker}_close'])
+        # Convert ts to proper timestamp
+        try:
+            ts_timestamp = pd.Timestamp(ts)
+            if pd.isna(ts_timestamp):
+                print(f"Warning: Invalid timestamp {ts}. Skipping.")
+                continue
+        except Exception as e:
+            print(f"Error converting timestamp {ts}: {e}. Skipping.")
+            continue
+        T = max((expiry - ts_timestamp).days / 365.0, 1/365)
+        
+        # Check if we should rebalance based on frequency
+        should_rebal = should_rebalance(
+            ts_timestamp, last_rebalance_date, rebalancing_freq, 
+            current_delta=None, target_delta=0.0, delta_threshold=delta_threshold
         )
-        option_delta = greeks['delta']
-        # Portfolio delta: option_qty * option_delta * 100 + stock_qty * 1.0
-        portfolio_view = portfolio.portfolio_view()
-        current_option_qty = portfolio_view['options'].get(option_ticker, None)
-        current_stock_qty = portfolio_view['stocks'].get(symbol, None)
-        if current_option_qty is not None:
-            option_qty = current_option_qty.qty
-        if current_stock_qty is not None:
-            stock_qty = current_stock_qty.qty
-        portfolio_delta = option_qty * option_delta * 100 + stock_qty
-        # Target: keep portfolio delta ≈ 0 by adjusting stock position
-        target_stock_qty = -option_qty * option_delta * 100
-        # Round to nearest integer
-        target_stock_qty = int(round(target_stock_qty))
-        # If adjustment needed, trade stock
-        if stock_qty != target_stock_qty:
-            trade_qty = target_stock_qty - stock_qty
-            portfolio.update_with_fill(Fill(symbol=symbol, qty=trade_qty, price=S, timestamp=ts))
-        # Update portfolio value
-        current_prices = {symbol: S, option_ticker: opt_price}
-        portfolio.update_portfolio_value(current_prices, ts)
+        
+        if should_rebal:
+            # 1. Calculate current implied volatility from both call and put prices
+            try:
+                from backtesting_module.quantlib import compute_iv_quantlib
+                
+                # Calculate days to maturity
+                days_to_maturity = max((expiry - ts_timestamp).days, 1)
+                
+                # Calculate implied vol from call
+                sigma_implied_call = compute_iv_quantlib(
+                    spot_price=S,
+                    option_price=call_price,
+                    strike_price=call_strike,
+                    days_to_maturity=days_to_maturity,
+                    risk_free_rate=r,
+                    option_type="call",
+                    exercise_style="american",
+                    tree="crr",
+                    steps=1000
+                )
+                
+                # Calculate implied vol from put
+                sigma_implied_put = compute_iv_quantlib(
+                    spot_price=S,
+                    option_price=put_price,
+                    strike_price=put_strike,
+                    days_to_maturity=days_to_maturity,
+                    risk_free_rate=r,
+                    option_type="put",
+                    exercise_style="american",
+                    tree="crr",
+                    steps=1000
+                )
+                
+                # Use average of call and put implied vol
+                sigma_implied = (sigma_implied_call + sigma_implied_put) / 2
+            except Exception as e:
+                print(f"Warning: Could not calculate implied volatility at {ts}: {e}")
+                sigma_implied = 0.20  # Fallback
+            
+            # 2. Get volatility forecast
+            if use_batch_predictions:
+                sigma_forecast = volatility_forecasts.get(ts_timestamp, 0.2)
+            else:
+                current_price_data = stock_df['close'].loc[:ts_timestamp]
+                sigma_forecast = volatility_forecaster.forecast_volatility(current_price_data, ts_timestamp)
+            
+            # 3. Compute vol_diff signal
+            vol_diff = sigma_forecast - sigma_implied
+            
+            # 4. Determine new position based on vol_diff
+            new_position_side = 0
+            if vol_diff > threshold:
+                new_position_side = 1  # Long straddle
+            elif vol_diff < -threshold:
+                new_position_side = -1  # Short straddle
+            
+            # 5. Calculate Greeks for both call and put using IMPLIED volatility
+            try:
+                # Call Greeks
+                call_greeks = greeks_engine.compute(
+                    symbol=call_ticker,
+                    underlying_price=S,
+                    strike=call_strike,
+                    time_to_expiry=T,
+                    volatility=sigma_implied,
+                    risk_free_rate=r,
+                    option_type="call"
+                )
+                
+                # Put Greeks
+                put_greeks = greeks_engine.compute(
+                    symbol=put_ticker,
+                    underlying_price=S,
+                    strike=put_strike,
+                    time_to_expiry=T,
+                    volatility=sigma_implied,
+                    risk_free_rate=r,
+                    option_type="put"
+                )
+                
+                call_delta = call_greeks['delta']
+                call_vega = call_greeks['vega']
+                put_delta = put_greeks['delta']
+                put_vega = put_greeks['vega']
+                
+                # Straddle Greeks
+                straddle_delta = call_delta - put_delta
+                straddle_vega = call_vega + put_vega
+                
+                if pd.isna(call_delta) or pd.isna(put_delta):
+                    print(f"Warning: NaN Greeks at {ts}. Skipping rebalancing.")
+                    continue
+                    
+            except Exception as e:
+                print(f"Error calculating Greeks at {ts}: {e}. Skipping rebalancing.")
+                continue
+            
+            # 6. Calculate new position sizes
+            V_vega = 1000  # Vega risk budget
+            new_call_qty = 0
+            new_put_qty = 0
+            new_stock_qty = 0
+            
+            if new_position_side != 0:
+                # Calculate straddle position size using actual straddle vega
+                new_straddle_qty = new_position_side * (V_vega / straddle_vega) if straddle_vega > 0 else 0
+                new_straddle_qty = int(round(new_straddle_qty))
+                if abs(new_straddle_qty) > 10:  # Cap position size
+                    new_straddle_qty = 10 if new_straddle_qty > 0 else -10
+                
+                # For ATM straddle: both call and put have same quantity
+                new_call_qty = new_straddle_qty
+                new_put_qty = new_straddle_qty
+                
+                # Calculate stock hedge for the straddle using actual straddle delta
+                new_stock_qty = -straddle_delta * 100 * new_straddle_qty
+                new_stock_qty = int(round(new_stock_qty))
+            
+            # 7. Get current positions
+            portfolio_view = portfolio.portfolio_view()
+            current_call_qty = portfolio_view['options'].get(call_ticker, None)
+            current_put_qty = portfolio_view['options'].get(put_ticker, None)
+            current_stock_qty = portfolio_view['stocks'].get(symbol, None)
+            current_call_qty = current_call_qty.qty if current_call_qty is not None else 0
+            current_put_qty = current_put_qty.qty if current_put_qty is not None else 0
+            current_stock_qty = current_stock_qty.qty if current_stock_qty is not None else 0
+            
+            # 8. Execute trades if position changed
+            call_trade = new_call_qty - current_call_qty
+            put_trade = new_put_qty - current_put_qty
+            stock_trade = new_stock_qty - current_stock_qty
+            
+            if call_trade != 0:
+                portfolio.update_with_fill(Fill(symbol=call_ticker, qty=call_trade, price=call_price, timestamp=ts_timestamp))
+                position_changes += 1
+                print(f"📈 Call trade at {ts_timestamp.date()}: {current_call_qty} → {new_call_qty} {call_ticker}")
+            
+            if put_trade != 0:
+                portfolio.update_with_fill(Fill(symbol=put_ticker, qty=put_trade, price=put_price, timestamp=ts_timestamp))
+                position_changes += 1
+                print(f"📈 Put trade at {ts_timestamp.date()}: {current_put_qty} → {new_put_qty} {put_ticker}")
+            
+            if stock_trade != 0:
+                portfolio.update_with_fill(Fill(symbol=symbol, qty=stock_trade, price=S, timestamp=ts_timestamp))
+                print(f"📈 Stock hedge at {ts_timestamp.date()}: {current_stock_qty} → {new_stock_qty} {symbol}")
+            
+            # Log rebalancing info
+            if call_trade != 0 or put_trade != 0 or stock_trade != 0:
+                rebalance_count += 1
+                print(f"🔄 Rebalanced at {ts_timestamp.date()}: vol_diff={vol_diff:.4f}, signal={new_position_side}")
+            
+            # Update last rebalance date
+            last_rebalance_date = ts_timestamp
+        
+        # Update portfolio value (always)
+        current_prices = {symbol: S, call_ticker: call_price, put_ticker: put_price}
+        portfolio.update_portfolio_value(current_prices, ts_timestamp)
     print("\nBacktest complete.")
     metrics = portfolio.get_performance_metrics(risk_free_rate=r)
     print(f"Total return: {metrics['total_return']*100:.2f}%")
     print(f"Sharpe ratio: {metrics['sharpe_ratio']:.2f}")
+    
+    # Strategy summary
+    print(f"\n📊 Volatility-Timing Strategy Summary:")
+    print(f"   Volatility threshold: {threshold:.3f}")
+    print(f"   Vega risk budget: $1000")
+    print(f"   Total position changes: {position_changes}")
+    print(f"   Rebalancing frequency: {rebalancing_freq}")
+    print(f"   Total rebalances: {rebalance_count}")
+    print(f"   Rebalance rate: {rebalance_count/len(combined_df)*100:.1f}% of bars")
+    
+    # Volatility forecasting performance
+    if volatility_forecaster:
+        vol_metrics = volatility_forecaster.get_performance_metrics()
+        if vol_metrics:
+            print(f"\n📊 Volatility Forecasting Performance:")
+            print(f"   MAE: {vol_metrics['mae']*100:.2f}%")
+            print(f"   RMSE: {vol_metrics['rmse']*100:.2f}%")
+            print(f"   MAPE: {vol_metrics['mape']:.2f}%")
+            print(f"   Correlation: {vol_metrics['correlation']:.3f}")
+            print(f"   Forecasts made: {vol_metrics['n_forecasts']}")
 
 if __name__ == "__main__":
     main()
