@@ -269,62 +269,7 @@ class BacktestEngine:
         # Dummy implementation for now
         return {}
 
-def find_best_straddle_combinations(calls, puts, current_stock_price):
-    """
-    Find the best straddle combinations based on:
-    1. Same strike price (symmetric straddle)
-    2. Same expiry date
-    3. Close to ATM (current stock price)
-    4. Good liquidity (number of bars)
-    
-    Returns:
-        List of tuples: (call_ticker, put_ticker, strike, expiry, atm_distance, liquidity_score)
-    """
-    best_combinations = []
-    
-    for call_ticker, call_bars in calls:
-        try:
-            call_underlying, call_expiry, call_type, call_strike = parse_option_ticker(call_ticker)
-        except:
-            continue
-            
-        for put_ticker, put_bars in puts:
-            try:
-                put_underlying, put_expiry, put_type, put_strike = parse_option_ticker(put_ticker)
-            except:
-                continue
-            
-            # Check if same strike and expiry
-            if call_strike == put_strike and call_expiry == put_expiry:
-                atm_distance = abs(call_strike - current_stock_price)
-                liquidity_score = min(call_bars, put_bars)  # Use the lower of the two
-                
-                # Calculate a combined score (lower is better)
-                # Weight ATM distance more heavily than liquidity
-                combined_score = atm_distance * 2 + (1000 / liquidity_score) if liquidity_score > 0 else float('inf')
-                
-                best_combinations.append((
-                    call_ticker, put_ticker, call_strike, call_expiry, 
-                    atm_distance, liquidity_score, combined_score
-                ))
-    
-    # Sort by combined score (best first)
-    best_combinations.sort(key=lambda x: x[6])
-    
-    return best_combinations[:10]  # Return top 10
-
 def main():
-    print("🚀 VOLATILITY-TIMING STRADDLE STRATEGY BACKTESTER")
-    print("=" * 60)
-    print("📋 STRATEGY SUMMARY:")
-    print("   • Long straddle when forecasted volatility > implied volatility")
-    print("   • Short straddle when forecasted volatility < implied volatility") 
-    print("   • Delta-neutral hedging with stock position")
-    print("   • Daily rebalancing based on volatility signals")
-    print("   • Options control 100 shares each (standard contract size)")
-    print("   • Target: Profit from volatility mispricing")
-    print("=" * 60)
-    print()
     print("Initializing Backtesting Engine...")
     # Prompt for API keys or use empty strings for demo
     alpaca_key = input("Enter Alpaca API key (or leave blank): ").strip()
@@ -605,134 +550,29 @@ def main():
 
     print(f"\n📞 Available CALL options:")
     for idx, (opt, count) in enumerate(calls[:10]):  # Show top 10 calls
-        # Extract strike price for display
-        try:
-            strike = float(opt.split('C')[-1]) / 1000
-            print(f"  {idx}: {opt} (strike: ${strike}, bars: {count})")
-        except:
-            print(f"  {idx}: {opt} (bars: {count})")
+        print(f"  {idx}: {opt} (bars: {count})")
 
     print(f"\n📞 Available PUT options:")
     for idx, (opt, count) in enumerate(puts[:10]):  # Show top 10 puts
-        # Extract strike price for display
-        try:
-            strike = float(opt.split('P')[-1]) / 1000
-            print(f"  {idx}: {opt} (strike: ${strike}, bars: {count})")
-        except:
-            print(f"  {idx}: {opt} (bars: {count})")
+        print(f"  {idx}: {opt} (bars: {count})")
 
-    # Get current stock price for ATM analysis
-    current_stock_price = stock_df['close'].iloc[-1]
-    
-    print(f"\n🎯 STRADDLE SELECTION REMINDER:")
-    print(f"   A straddle consists of ONE CALL + ONE PUT with the SAME:")
-    print(f"   • Strike price (K)")
-    print(f"   • Expiry date (T)")
-    print(f"   • Underlying asset")
-    print(f"   ")
-    print(f"   For proper delta-neutral straddle strategy, select options with matching strikes!")
-    print(f"   💡 TIP: Choose strikes close to current stock price (${current_stock_price:.2f}) for ATM straddle")
-    print(f"   Example: Call at $325 + Put at $325 (same strike, close to current price)")
-    print(f"   ")
-    
-    # Offer automatic straddle selection
-    print(f"🔍 AUTOMATIC STRADDLE SELECTION:")
-    print(f"   Would you like to automatically find the best straddle combinations?")
-    print(f"   This will find options with same strike/expiry, close to ATM, and good liquidity.")
-    
-    auto_select = input("   Use automatic selection? (y/N): ").strip().lower()
-    
-    if auto_select == 'y':
-        print(f"\n🔍 Finding best straddle combinations...")
-        best_combinations = find_best_straddle_combinations(calls, puts, current_stock_price)
-        
-        if best_combinations:
-            print(f"\n🏆 TOP STRADDLE COMBINATIONS (ranked by ATM distance + liquidity):")
-            for i, (call_ticker, put_ticker, strike, expiry, atm_dist, liquidity, score) in enumerate(best_combinations):
-                print(f"   {i+1}: Call {call_ticker} + Put {put_ticker}")
-                print(f"       Strike: ${strike}, Expiry: {expiry.date()}")
-                print(f"       ATM Distance: ${atm_dist:.2f}, Liquidity: {liquidity} bars")
-                print(f"       Combined Score: {score:.2f}")
-                print()
-            
-            choice = input(f"Select combination (1-{len(best_combinations)}) or press Enter for manual selection: ").strip()
-            if choice.isdigit() and 1 <= int(choice) <= len(best_combinations):
-                selected_idx = int(choice) - 1
-                call_ticker, put_ticker = best_combinations[selected_idx][0], best_combinations[selected_idx][1]
-                print(f"✅ Selected: {call_ticker} + {put_ticker}")
-            else:
-                print("Proceeding with manual selection...")
-                # Continue to manual selection
-        else:
-            print("❌ No suitable straddle combinations found. Proceeding with manual selection...")
-            # Continue to manual selection
-    
-    # Manual selection (if auto-select was not used or failed)
-    if auto_select != 'y' or 'choice' not in locals() or not choice.isdigit():
-        # Select call option
-        call_idx = int(input(f"\nSelect a CALL option (0-{len(calls)-1}): "))
-        if call_idx < 0 or call_idx >= len(calls):
-            print("Invalid call selection. Exiting.")
-            return
-        call_ticker = calls[call_idx][0]
-
-        # Select put option
-        put_idx = int(input(f"Select a PUT option (0-{len(puts)-1}): "))
-        if put_idx < 0 or put_idx >= len(puts):
-            print("Invalid put selection. Exiting.")
-            return
-        put_ticker = puts[put_idx][0]
-
-    # Parse option details for validation
-    try:
-        call_underlying, call_expiry, call_type, call_strike = parse_option_ticker(call_ticker)
-        put_underlying, put_expiry, put_type, put_strike = parse_option_ticker(put_ticker)
-    except Exception as e:
-        print(f"Could not parse option tickers: {e}. Exiting.")
+    # Select call option
+    call_idx = int(input(f"\nSelect a CALL option (0-{len(calls)-1}): "))
+    if call_idx < 0 or call_idx >= len(calls):
+        print("Invalid call selection. Exiting.")
         return
-    
-    # Validate that we have a proper straddle (same strike and expiry)
-    if call_strike != put_strike:
-        print(f"\n⚠️  WARNING: Asymmetric straddle detected!")
-        print(f"   Call strike: ${call_strike}")
-        print(f"   Put strike:  ${put_strike}")
-        print(f"   This will result in non-zero straddle delta and require larger stock hedging.")
-        print(f"   For proper delta-neutral straddle, select options with the same strike.")
-        
-        proceed = input("   Continue anyway? (y/N): ").strip().lower()
-        if proceed != 'y':
-            print("   Exiting. Please select options with the same strike for proper straddle strategy.")
-            return
-    
-    if call_expiry != put_expiry:
-        print(f"\n⚠️  WARNING: Different expiry dates detected!")
-        print(f"   Call expiry: {call_expiry.date()}")
-        print(f"   Put expiry:  {put_expiry.date()}")
-        print(f"   This may cause issues with the straddle strategy.")
-        
-        proceed = input("   Continue anyway? (y/N): ").strip().lower()
-        if proceed != 'y':
-            print("   Exiting. Please select options with the same expiry for proper straddle strategy.")
-            return
-    
-    # Get current stock price for ATM analysis
-    current_stock_price = stock_df['close'].iloc[-1]
-    atm_distance = abs(call_strike - current_stock_price)
-    
+    call_ticker = calls[call_idx][0]
+
+    # Select put option
+    put_idx = int(input(f"Select a PUT option (0-{len(puts)-1}): "))
+    if put_idx < 0 or put_idx >= len(puts):
+        print("Invalid put selection. Exiting.")
+        return
+    put_ticker = puts[put_idx][0]
+
     print(f"\nSelected straddle:")
-    print(f"  Call: {call_ticker} (strike: ${call_strike})")
-    print(f"  Put:  {put_ticker} (strike: ${put_strike})")
-    print(f"  Expiry: {call_expiry.date()}")
-    print(f"  Current stock price: ${current_stock_price:.2f}")
-    print(f"  Distance from ATM: ${atm_distance:.2f}")
-    
-    if call_strike == put_strike:
-        if atm_distance < 5.0:  # Within $5 of current price
-            print(f"  ✅ Symmetric ATM straddle (close to current price)")
-        else:
-            print(f"  ⚠️  Symmetric straddle but not ATM (${atm_distance:.2f} from current price)")
-    else:
-        print(f"  ⚠️  Asymmetric straddle (different strikes)")
+    print(f"  Call: {call_ticker}")
+    print(f"  Put:  {put_ticker}")
     
     # For now, we'll use the call ticker as the primary option for data fetching
     # In a full implementation, we'd fetch both call and put data
@@ -923,20 +763,6 @@ def main():
         print(f"  Call delta: {call_delta:.4f}, vega: {call_vega:.4f}")
         print(f"  Put delta: {put_delta:.4f}, vega: {put_vega:.4f}")
         print(f"  Straddle delta: {straddle_delta:.4f}, vega: {straddle_vega:.4f}")
-        
-        # Educational output about straddle delta and contract size
-        if abs(straddle_delta) > 0.1:
-            print(f"  ⚠️  Note: Straddle delta is {straddle_delta:.4f} (not close to 0)")
-            if call_strike != put_strike:
-                print(f"     This indicates an asymmetric straddle (different strikes)")
-            else:
-                print(f"     This indicates the strike is not ATM (current price: ${S0:.2f}, strike: ${call_strike})")
-            print(f"     For ATM straddle, delta should be close to 0")
-        else:
-            print(f"  ✅ Straddle delta is close to 0 (symmetric ATM straddle)")
-        
-        print(f"  📊 Note: Each option contract controls 100 shares")
-        print(f"     Stock hedge calculation: -straddle_delta × 100 × straddle_qty")
         
         if pd.isna(call_delta) or pd.isna(put_delta):
             print("Error: Initial delta is NaN. Exiting.")
