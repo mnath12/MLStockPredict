@@ -1,0 +1,50 @@
+version: '3.8'
+
+services:
+  mlstockpredict-dev:
+    build: .
+    container_name: mlstockpredict-dev
+    volumes:
+      # Mount your code for live development
+      - .:/app
+      # Mount a data directory for models and data
+      - ./data:/app/data
+      # Mount volatility models directory
+      - ./volatility_models:/app/volatility_models
+      # Exclude certain directories from mounting
+      - /app/__pycache__
+      - /app/.git
+      - /app/node_modules
+    ports:
+      # Jupyter notebook access
+      - "8888:8888"
+      # Streamlit (for future demo website)
+      - "8501:8501"
+    environment:
+      - PYTHONPATH=/app
+      - PYTHONUNBUFFERED=1
+      # Add your API keys here (or use .env file)
+      - ALPACA_API_KEY=${ALPACA_API_KEY}
+      - ALPACA_SECRET_KEY=${ALPACA_SECRET_KEY}
+      - POLYGON_API_KEY=${POLYGON_API_KEY}
+      - FRED_API_KEY=${FRED_API_KEY}
+    working_dir: /app
+    stdin_open: true
+    tty: true
+    # Keep container running
+    command: tail -f /dev/null
+
+  # Optional: Jupyter notebook service
+  jupyter:
+    build: .
+    container_name: mlstockpredict-jupyter
+    volumes:
+      - .:/app
+      - ./data:/app/data
+      - ./volatility_models:/app/volatility_models
+    ports:
+      - "8888:8888"
+    environment:
+      - PYTHONPATH=/app
+    working_dir: /app
+    command: jupyter notebook --ip=0.0.0.0 --port=8888 --no-browser --allow-root --NotebookApp.token='' --NotebookApp.password='' 

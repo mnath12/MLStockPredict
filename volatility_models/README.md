@@ -1,95 +1,222 @@
-# Volatility Models Folder
+# LSTM Volatility Model Integration Guide
 
-This folder is used to store trained volatility forecasting models that can be used by the backtesting system.
+This guide explains how to integrate and use your LSTM volatility model trained on Google Colab with the backtesting system.
 
-## Supported Model Formats
+## Overview
 
-The backtesting system supports the following model file formats:
+The integration allows you to use your pre-trained LSTM model for volatility forecasting during backtesting, providing more accurate volatility predictions for your straddle strategy.
 
-- **`.pkl`** - Pickled scikit-learn models (Random Forest, Linear Regression, SVR, XGBoost)
-- **`.h5`** - Keras/TensorFlow models (LSTM, Neural Networks)
-- **`.keras`** - Keras model format (alternative to .h5)
-- **`.json`** - Model configuration files with parameters
+## Files Structure
 
-## How to Use
+```
+volatility_models/
+├── volatility_lstm_model.h5      # Your trained LSTM model from Colab
+├── volatility_scaler.pkl          # Your trained scaler from Colab
+└── README.md                      # This file
 
-1. **Train your model** in Google Colab or locally
-2. **Save the model** in one of the supported formats
-3. **Place the model file** in this `volatility_models/` folder
-4. **Run the backtesting system** and select option 1 for local models
-5. **Choose your model** from the list of available models
-
-## Example Model Training (Google Colab)
-
-```python
-# Train a Random Forest model
-from sklearn.ensemble import RandomForestRegressor
-import pickle
-
-# Your training code here...
-model = RandomForestRegressor(n_estimators=100)
-model.fit(X_train, y_train)
-
-# Save the model
-with open('volatility_model_rf.pkl', 'wb') as f:
-    pickle.dump(model, f)
-
-# Download the file from Colab
-from google.colab import files
-files.download('volatility_model_rf.pkl')
+backtesting_module/
+├── lstm_volatility_forecaster.py  # LSTM-specific forecaster
+├── volatility_forecaster.py       # General volatility forecaster
+└── main.py                        # Main backtesting script
 ```
 
-## Example Model Training (LSTM)
+## Setup Instructions
 
-```python
-# Train an LSTM model
-import tensorflow as tf
-from tensorflow import keras
+### 1. Place Your Model Files
 
-# Your LSTM training code here...
-model = keras.Sequential([
-    keras.layers.LSTM(50, return_sequences=True, input_shape=(sequence_length, n_features)),
-    keras.layers.LSTM(50),
-    keras.layers.Dense(1)
-])
-model.compile(optimizer='adam', loss='mse')
-model.fit(X_train, y_train, epochs=50, batch_size=32)
+Ensure your Colab-trained model files are in the `volatility_models/` folder:
 
-# Save the model
-model.save('volatility_model_lstm.h5')
+- `volatility_lstm_model.h5` - Your trained LSTM model
+- `volatility_scaler.pkl` - Your trained scaler
 
-# Download the file from Colab
-from google.colab import files
-files.download('volatility_model_lstm.h5')
+### 2. Install Dependencies
+
+Make sure you have TensorFlow installed:
+
+```bash
+pip install tensorflow
 ```
 
-## Model Requirements
+### 3. Test the Integration
 
-Your trained model should:
+Run the test script to verify everything works:
 
-1. **Accept price data** as input features
-2. **Output volatility forecasts** as decimal values (e.g., 0.25 for 25% volatility)
-3. **Be compatible** with the `VolatilityForecaster` class interface
+```bash
+python test_lstm_integration.py
+```
 
-## Dependencies
+This will test:
+- Model loading
+- Data fetching
+- Volatility forecasting
 
-To use LSTM/Keras models (.h5/.keras files), you need:
-- **TensorFlow**: `pip install tensorflow`
-- **Keras**: Usually included with TensorFlow
+## Using the LSTM Model in Backtesting
 
-If TensorFlow is not available, the system will automatically fall back to the EWMA method.
+### 1. Run the Main Script
 
-## Fallback Method
+```bash
+python backtesting_module/main.py
+```
 
-If no models are available or if model loading fails, the system will automatically use the fallback method:
-- **Exponentially Weighted Moving Average (EWMA)** of historical volatility
-- **Rolling standard deviation** of returns
+### 2. Choose LSTM Volatility Forecasting
 
-This ensures the backtesting system always has a volatility estimate available.
+When prompted for volatility forecasting method, choose option **1**:
 
-## File Naming Convention
+```
+🔮 Volatility Forecasting Setup:
+1. Use LSTM model from volatility_models folder (recommended)
+2. Use other local model from volatility_models folder
+3. Use fallback method (exponentially weighted)
 
-For better organization, consider naming your models descriptively:
-- `aapl_rf_volatility_model.pkl`
-- `tsla_lstm_volatility_model.h5`
-- `spy_xgboost_volatility_model.pkl` 
+Choose volatility forecasting method (1/2/3) [default: 1]: 1
+```
+
+### 3. Enter Your Parameters
+
+The system will prompt you for:
+
+- **Stock symbol**: e.g., `AAPL`, `TSLA`, `GOOGL`
+- **Start date**: e.g., `2024-01-01`
+- **End date**: e.g., `2024-12-31`
+- **Frequency**: e.g., `1D` (daily), `1H` (hourly)
+- **Rebalancing frequency**: Daily, weekly, monthly, or every bar
+- **Delta threshold**: Minimum delta deviation to trigger rebalancing
+
+### 4. Select Options
+
+Choose your straddle options (call and put with same strike and expiry).
+
+## How the LSTM Model Works
+
+### Data Processing
+
+1. **Price Data**: The system fetches minute-level price data for the stock
+2. **Hourly Realized Volatility**: Computes hourly realized volatility using the same method as your Colab training
+3. **LSTM Input**: Prepares 60-hour lookback windows for the LSTM model
+4. **Scaling**: Uses your trained scaler to normalize the data
+5. **Prediction**: Makes volatility forecasts using the LSTM model
+
+### Integration Points
+
+- **Initial Forecast**: Used to determine initial straddle position
+- **Rebalancing**: Used at each rebalancing point to update positions
+- **Performance Tracking**: Monitors forecast accuracy vs. actual volatility
+
+## Model Parameters
+
+The LSTM forecaster uses these parameters (matching your Colab training):
+
+- **Memory Window**: 60 hours (lookback period)
+- **Input Format**: Hourly realized volatility
+- **Scaling**: MinMaxScaler (0, 1)
+- **Timezone**: America/New_York
+
+## Error Handling
+
+The system includes comprehensive error handling:
+
+- **Model Loading Failures**: Falls back to EWMA volatility estimation
+- **Data Issues**: Handles missing or insufficient data gracefully
+- **Prediction Errors**: Falls back to simple volatility estimation
+- **Invalid Forecasts**: Validates forecast values and uses fallbacks
+
+## Performance Monitoring
+
+The system tracks LSTM model performance:
+
+- **MAE**: Mean Absolute Error
+- **RMSE**: Root Mean Square Error
+- **MAPE**: Mean Absolute Percentage Error
+- **Correlation**: Forecast vs. actual correlation
+- **Forecast Count**: Number of predictions made
+
+## Troubleshooting
+
+### Common Issues
+
+1. **Model Files Not Found**
+   ```
+   ❌ LSTM model files not found
+   ```
+   - Ensure `volatility_lstm_model.h5` and `volatility_scaler.pkl` are in `volatility_models/`
+
+2. **TensorFlow Not Available**
+   ```
+   ❌ TensorFlow not available for loading LSTM model
+   ```
+   - Install TensorFlow: `pip install tensorflow`
+
+3. **Insufficient Data**
+   ```
+   ❌ Not enough historical data for LSTM input
+   ```
+   - Use a longer date range or higher frequency data
+
+4. **API Key Issues**
+   ```
+   ❌ Error fetching stock data
+   ```
+   - Check your Alpaca and Polygon API keys
+
+### Debug Mode
+
+For detailed error information, check the console output. The system provides detailed error messages and stack traces for debugging.
+
+## Example Usage
+
+Here's a complete example of running the backtesting system with LSTM:
+
+```bash
+python backtesting_module/main.py
+
+# Enter API keys (or leave blank for demo)
+Enter Alpaca API key (or leave blank): 
+Enter Alpaca API secret (or leave blank): 
+Enter Polygon API key (or leave blank): 
+
+# Choose LSTM volatility forecasting
+Choose volatility forecasting method (1/2/3) [default: 1]: 1
+
+# Enter parameters
+Enter stock symbol (e.g., AAPL): TSLA
+Enter start date (YYYY-MM-DD): 2024-01-01
+Enter end date (YYYY-MM-DD): 2024-12-31
+Enter frequency (e.g., 1D, 5Min) [default: 1D]: 1D
+
+# Select straddle options
+# ... (follow prompts for option selection)
+
+# System will use LSTM for volatility forecasting
+🤖 Loading LSTM volatility model...
+✅ LSTM volatility model loaded successfully
+   Using hourly realized volatility forecasting
+```
+
+## Performance Expectations
+
+With your LSTM model, you should see:
+
+- More accurate volatility forecasts compared to simple methods
+- Better timing of straddle entries and exits
+- Improved risk-adjusted returns
+- More stable delta hedging
+
+The system will show LSTM-specific performance metrics at the end of the backtest.
+
+## Next Steps
+
+1. **Test with Different Stocks**: Try the system with various liquid stocks
+2. **Adjust Parameters**: Experiment with different rebalancing frequencies and thresholds
+3. **Monitor Performance**: Track the LSTM model's forecasting accuracy
+4. **Retrain Model**: If needed, retrain the LSTM model with more recent data
+
+## Support
+
+If you encounter issues:
+
+1. Run the test script: `python test_lstm_integration.py`
+2. Check the error messages in the console
+3. Verify your model files are correctly placed
+4. Ensure all dependencies are installed
+
+The system is designed to be robust and will fall back to simpler methods if the LSTM model fails, ensuring your backtesting can continue.

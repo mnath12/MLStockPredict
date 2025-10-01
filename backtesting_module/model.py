@@ -1,0 +1,382 @@
+# Make sure that you have all these libaries available to run the code successfully
+import matplotlib.pyplot as plt
+import pandas as pd
+import datetime as dt
+import urllib.request, json
+import os
+import numpy as np
+import tensorflow as tf # This code has been tested with TensorFlow 1.6
+from sklearn.preprocessing import MinMaxScaler
+from keras.models import Sequential
+from keras.layers import LSTM, Dropout, Dense, Conv1D, MaxPooling1D
+import yfinance as yf
+
+from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.requests   import StockBarsRequest
+from alpaca.data.timeframe  import TimeFrame, TimeFrameUnit
+import re
+import pytz
+
+KEY = "PKCLL4TXCDLRN76OGRAB"
+SECRET = "ig5CGnl3c1jXEepU6VK5DPXgsV5WSOBYrIJGk70T"
+
+def _parse_timeframe(freq: str) -> TimeFrame:
+    """
+    Convert strings like '5Min', '12H', '1D', '1W', '3M' to an Alpaca TimeFrame.
+
+    Raises
+    ------
+    ValueError if the format is unrecognised.
+    """
+    match = re.fullmatch(r"(\d+)([A-Za-z]+)", freq)
+    if not match:
+        raise ValueError(f"Bad timeframe '{freq}'. Try '5Min', '12H', '1D', etc.")
+    n, unit = int(match.group(1)), match.group(2).lower()
+
+    if unit in ("min", "t"):
+        return TimeFrame(n, TimeFrameUnit.Minute)
+    if unit in ("hour", "h"):
+        return TimeFrame(n, TimeFrameUnit.Hour)
+    if unit in ("day", "d"):
+        return TimeFrame(n, TimeFrameUnit.Day)
+    if unit in ("week", "w"):
+        return TimeFrame(n, TimeFrameUnit.Week)
+    if unit in ("month", "m"):
+        return TimeFrame(n, TimeFrameUnit.Month)
+
+    raise ValueError(f"Unsupported timeframe unit '{unit}' in '{freq}'")
+
+
+def get_bars_df(
+        ticker: str,
+        start_date: str,
+        end_date: str,
+        timeframe: str,
+        api_key: str,
+        secret_key: str,
+        tz: dt.tzinfo = dt.timezone.utc
+    ) -> pd.DataFrame:
+    """
+    Download historical bars and return a tidy DataFrame.
+
+    Parameters
+    ----------
+    ticker      : e.g. 'SPY'
+    start_date  : 'YYYY-MM-DD'
+    end_date    : 'YYYY-MM-DD'
+    timeframe   : '5Min', '12H', '1D', '1W', '3M', …
+    api_key     : Alpaca API key
+    secret_key  : Alpaca secret key
+    tz          : timezone for returned index (default UTC)
+
+    Returns
+    -------
+    pandas.DataFrame with a (tz-aware) DatetimeIndex and standard OHLCV columns.
+    """
+    tf = _parse_timeframe(timeframe)
+
+    client = StockHistoricalDataClient(api_key, secret_key)
+
+    req = StockBarsRequest(
+        symbol_or_symbols=ticker,
+        timeframe=tf,
+        start=dt.datetime.fromisoformat(start_date).replace(tzinfo=tz),
+        end=dt.datetime.fromisoformat(end_date).replace(tzinfo=tz),
+    )
+
+    bars = client.get_stock_bars(req)          # SDK auto-paginates
+    df   = bars.df.sort_index()                # tidy Multi-Index (symbol, timestamp)
+
+    # If you prefer a simple DatetimeIndex because you queried one symbol:
+    if isinstance(df.index, pd.MultiIndex):
+        df = df.xs(ticker, level="symbol")
+
+    return df.tz_convert(tz)                   # final consistent timezone
+
+
+df = get_bars_df(
+    ticker      = "AAPL",
+    start_date  = "2023-07-27",
+    end_date    = "2025-07-18",
+    timeframe   = "1Min",      # any of '5Min', '12H', '1D', etc.
+    api_key     = KEY,
+    secret_key  = SECRET,
+    tz=pytz.timezone("America/New_York")
+
+)
+
+print(df)
+
+
+# ... existing code ...
+
+def get_rv(bars_df: pd.DataFrame,
+                          symbol: str = "SPY",
+                          price_col: str = "close",
+                          tz: str = "America/New_York"):
+  # ─── 1 ▸ slice desired symbol, ensure datetime index ─────────────────────
+    if isinstance(bars_df.index, pd.MultiIndex):
+        px = (bars_df.xs(symbol, level="symbol")[price_col]
+                             .tz_convert(tz)
+                             .sort_index())
+    else:                                 # already single-ticker
+        px = bars_df[price_col].tz_convert(tz).sort_index()
+
+    # ─── 2 ▸ compute returns & realised vol ─────────────────────────────────
+    ret  = px.pct_change().dropna()                       # simple %
+    lret = np.log(px).diff().dropna()                     # log return
+
+    # realised vol: √(∑ intraday r²)  per *calendar* day (252-day ann. later)
+    rv_daily = (ret.pow(2)
+                   .groupby(ret.index.date).sum()
+                   .pipe(np.sqrt)
+                   .rename("rv"))
+    rv_daily.index = pd.to_datetime(rv_daily.index).tz_localize(tz)
+    return rv_daily
+
+
+def plot_series(series, title, ylabel):
+    fig, ax = plt.subplots()
+    series.plot(ax=ax)
+    mu, sd = series.mean(), series.std()
+    ax.set_title(title)
+    ax.set_ylabel(ylabel)
+    ax.grid(True, alpha=0.3)
+    ax.text(0.02, 0.95,
+            f"μ = {mu:+.4f}\nσ = {sd:.4f}",
+            transform=ax.transAxes,
+            verticalalignment="top",
+            bbox=dict(boxstyle="round", facecolor="white", alpha=0.6))
+    plt.show()
+
+def plot_price_returns_rv(bars_df: pd.DataFrame,
+                          symbol: str = "SPY",
+                          price_col: str = "close",
+                          tz: str = "America/New_York"):
+    """
+    Plot price, simple return, log return, and daily realised volatility.
+
+    Parameters
+    ----------
+    bars_df   : DataFrame
+        Output of `bars.df`.  Expected MultiIndex (symbol, timestamp) or
+        a DatetimeIndex if you have already selected one ticker.
+    symbol    : str
+        Ticker to plot (ignored if bars_df is already single-ticker).
+    price_col : str
+        Column name containing prices ('close' for Alpaca bars).
+    tz        : str
+        Time-zone for date labels.
+    """
+    # ─── 1 ▸ slice desired symbol, ensure datetime index ─────────────────────
+    if isinstance(bars_df.index, pd.MultiIndex):
+        px = (bars_df.xs(symbol, level="symbol")[price_col]
+                             .tz_convert(tz)
+                             .sort_index())
+    else:                                 # already single-ticker
+        px = bars_df[price_col].tz_convert(tz).sort_index()
+
+    # ─── 2 ▸ compute returns & realised vol ─────────────────────────────────
+    ret  = px.pct_change().dropna()                       # simple %
+    lret = np.log(px).diff().dropna()                     # log return
+
+    # realised vol: √(∑ intraday r²)  per *calendar* day (252-day ann. later)
+    rv_daily = get_rv(bars_df, symbol, price_col, tz)
+
+    # ─── 3 ▸ helper to annotate μ, σ on each panel ───────────────────────────
+
+
+    # ─── 4 ▸ draw the four figures ──────────────────────────────────────────
+    plot_series(px,   f"{symbol} price",               "price")
+    plot_series(ret,  f"{symbol} simple return rₜ",    "return")
+    plot_series(lret, f"{symbol} log return ℓₜ",       "log-return")
+    plot_series(rv_daily,
+                f"{symbol} daily realised volatility σᴿ (√∑ r²)",
+                "σᴿ")
+
+plot_price_returns_rv(df)
+
+# Replace your previous get_hourly_rv with this enhanced version
+def get_hourly_rv(
+    bars_df: pd.DataFrame,
+    symbol: str = "SPY",
+    price_col: str = "close",
+    tz: str = "America/New_York"
+) -> pd.Series:
+    """
+    Compute hourly realized volatility during regular US trading hours,
+    labeling each hour by its _end_ time (e.g. returns in (09:00,10:00] → 10:00).
+    """
+    # ─── 1 slice out the ticker & ensure tz-aware local index ───────────────
+    if isinstance(bars_df.index, pd.MultiIndex):
+        px = (bars_df
+              .xs(symbol, level="symbol")[price_col]
+              .tz_convert(tz)
+              .sort_index())
+    else:
+        px = bars_df[price_col].tz_convert(tz).sort_index()
+
+    # ─── 2 restrict to regular session (09:30–16:00) & drop NaNs ────────────
+    ret = px.pct_change().dropna()
+
+    # ─── 3 square returns & bin into right-closed hourly buckets ────────────
+    sq = ret.pow(2)
+    # label='right' means (H-1,H] → H
+    hourly_sum = sq.groupby(pd.Grouper(freq="H", label="right", closed="right")).sum()
+
+    # ─── 4 take sqrt to get realized vol & name it ──────────────────────────
+    rv_hourly = np.sqrt(hourly_sum).rename("rv_hourly")
+
+    # ─── 5 ensure the index is tz-aware local hours ─────────────────────────
+    if rv_hourly.index.tz is None:
+        rv_hourly.index = rv_hourly.index.tz_localize(tz)
+
+    return rv_hourly
+
+# ... existing code ...
+
+def train_test_split_last_n_days(df: pd.DataFrame, n_days: int = 7):
+    """
+    Splits a DataFrame into train and test sets,
+    where the test set is the last `n_days` calendar days of the index.
+
+    Parameters
+    ----------
+    df     : pd.DataFrame
+        Must have a DateTimeIndex (can be tz-aware or naive).
+    n_days : int
+        Number of days to reserve for the test set (default=7).
+
+    Returns
+    -------
+    train_df, test_df : (pd.DataFrame, pd.DataFrame)
+    """
+    # Ensure sorted by time
+    df_sorted = df.sort_index()
+
+    # Compute cutoff timestamp
+    last_ts = df_sorted.index.max()
+    cutoff  = last_ts - pd.Timedelta(days=n_days)
+
+    # Split
+    train_df = df_sorted.loc[df_sorted.index <= cutoff]
+    test_df  = df_sorted.loc[df_sorted.index >  cutoff]
+
+    return train_df, test_df
+
+rv_hourly = get_hourly_rv(df, symbol="NFLX", price_col="close", tz="America/New_York")
+print(rv_hourly)
+
+# Example usage:
+train_rv, test_set = train_test_split_last_n_days(rv_hourly, n_days=7)
+print(train_rv)
+print(f"Train from {train_rv.index.min()} to {train_rv.index.max()} ({len(train_rv)} rows)")
+print(f"Test  from {test_set.index.min()} to {test_set.index.max()} ({len(test_set)} rows)")
+training_set = train_rv.shift(-1).dropna()   # length N−1, target at t is RV at t+1
+print(training_set)
+
+# %%
+# ── Fix the 2D shape error when scaling a Series ─────────────────────────────
+
+# assume `training_set` is a pd.Series of shape (n_samples,)
+# convert to a 2D array of shape (n_samples, 1)
+train_vals = training_set.values.reshape(-1, 1)
+
+
+# now scale
+from sklearn.preprocessing import MinMaxScaler
+scaler = MinMaxScaler(feature_range=(0, 1))
+training_scaled = scaler.fit_transform(train_vals)
+
+# ── build LSTM sequences ────────────────────────────────────────────────────
+memory = 60  # or whatever lookback window you’re using
+
+X_train, y_train = [], []
+for i in range(memory, len(training_scaled)):
+    X_train.append(training_scaled[i - memory : i, 0])
+    y_train.append(training_scaled[i, 0])
+
+# reshape into [samples, time_steps, features]
+X_train = np.array(X_train).reshape(-1, memory, 1)
+y_train = np.array(y_train)
+
+print(f"Shapes → X_train: {X_train.shape}, y_train: {y_train.shape}")
+
+import kerastuner as kt
+from tensorflow.keras.callbacks import EarlyStopping
+# ... existing code ...
+
+# 1) Build a much smaller hypermodel factory
+def build_lstm_model_fast(hp):
+    model = Sequential()
+    # only 1–2 LSTM layers
+    for i in range(hp.Int('n_layers', 1, 2)):
+        units     = hp.Int(f'units_{i}', min_value=16, max_value=64, step=16)
+        dropout   = hp.Float(f'dropout_{i}', 0.0, max_value=0.3, step=0.1)
+        return_seq = (i < hp.get('n_layers') - 1)
+        if i == 0:
+            model.add(LSTM(units, return_sequences=return_seq,
+                           input_shape=(memory, 1)))
+        else:
+            model.add(LSTM(units, return_sequences=return_seq))
+        model.add(Dropout(dropout))
+    model.add(Dense(1))
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(
+            hp.Float('lr', 1e-3, 1e-2, sampling='log')
+        ),
+        loss='mean_squared_error'
+    )
+    return model
+
+# 2) Instantiate tuner with fewer trials
+tuner_fast = kt.RandomSearch(
+    build_lstm_model_fast,
+    objective='val_loss',
+    max_trials=5,               # reduce from 20 → 5
+    executions_per_trial=1,
+    directory='lstm_tuning_fast',
+    project_name='stock_pred_fast'
+)
+
+# 3) Run the search with fewer epochs for quick feedback
+tuner_fast.search(
+    X_train, y_train,
+    epochs=10,                  # reduce from 50 → 10
+    batch_size=16,              # smaller batch
+    validation_split=0.2,
+    callbacks=[EarlyStopping(patience=3)]
+)
+
+# 4) Retrieve best model
+best_fast = tuner_fast.get_best_models(num_models=1)[0]
+best_fast.summary()
+model = best_fast
+
+# 2️⃣ Build the test‐input windows
+full_vals = rv_hourly.values.reshape(-1, 1)
+inputs   = full_vals[-len(test_set) - memory :]
+inputs_scaled = scaler.transform(inputs)
+
+X_test = []
+for i in range(memory, len(inputs_scaled)):
+    X_test.append(inputs_scaled[i - memory : i, 0])
+X_test = np.array(X_test).reshape(-1, memory, 1)
+
+# 3️⃣ Predict & invert scaling
+pred_scaled = model.predict(X_test)
+pred_rv     = scaler.inverse_transform(pred_scaled).flatten()
+
+# 4️⃣ Plot Actual vs. Predicted
+plt.figure(figsize=(12, 5))
+plt.plot(test_set.index, test_set.values, 'o-', label='Actual RV', linewidth=2)
+plt.plot(test_set.index.shift(-1), pred_rv,       's--',label='Predicted RV', linewidth=2) # account for lag
+plt.title('Hourly Realized Volatility: Actual vs. Predicted (Last 7 Days)')
+plt.xlabel('Timestamp')
+plt.ylabel('Realized Volatility')
+
+plt.legend()
+plt.grid(alpha=0.3)
+plt.tight_layout()
+plt.show()
+

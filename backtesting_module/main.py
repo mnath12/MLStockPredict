@@ -9,6 +9,11 @@ Key Features:
 - Modular, extensible architecture for stock and option backtesting.
 - User-driven workflow for selecting stock, date range, and frequency.
 - Fetches and displays available option contracts for a given date.
+- **LSTM Volatility Forecasting Integration:**
+    - Uses pre-trained LSTM model from Colab for volatility predictions
+    - Processes hourly realized volatility data matching Colab training format
+    - Provides robust error handling with EWMA fallback
+    - Tracks model performance metrics during backtesting
 - **Parallelized option contract ranking:**
     - When ranking options by available data (number of bars), the code now uses Python's ThreadPoolExecutor to query Polygon's API for all contracts in parallel.
     - This dramatically speeds up the process of finding the top 20 most active/liquid contracts, making the workflow much more responsive for the user.
@@ -20,7 +25,10 @@ Key Features:
     - Falls back to 10-Year Treasury rate (DGS10) if 3-month data unavailable
     - Provides fallback to default rate if FRED API fails
 
-(Backtest execution is stubbed out as requested.)
+Environment Requirements:
+- Run in tf-m1 conda environment for optimal TensorFlow performance
+- Ensure TensorFlow >= 2.13.0 is installed
+- LSTM model files must be in volatility_models/ folder
 """
 
 from __future__ import annotations
@@ -28,10 +36,55 @@ from __future__ import annotations
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Optional, Any
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import warnings
 import re
 import concurrent.futures
+import os
+import sys
+
+# Environment validation for TensorFlow
+def validate_environment():
+    """Validate that the environment is properly set up for LSTM volatility forecasting."""
+    print("🔍 Validating environment for LSTM volatility forecasting...")
+    
+    # Check TensorFlow availability
+    try:
+        import tensorflow as tf
+        print(f"✅ TensorFlow version: {tf.__version__}")
+        
+        # Check if we're in the tf-m1 environment (optional)
+        conda_env = os.environ.get('CONDA_DEFAULT_ENV', 'unknown')
+        if 'tf-m1' in conda_env.lower():
+            print(f"✅ Running in tf-m1 conda environment: {conda_env}")
+        else:
+            print(f"⚠️  Current environment: {conda_env}")
+            print("   For optimal performance, consider using the tf-m1 conda environment")
+        
+        # Check GPU availability (optional)
+        gpus = tf.config.list_physical_devices('GPU')
+        if gpus:
+            print(f"✅ GPU available: {len(gpus)} device(s)")
+        else:
+            print("ℹ️  No GPU detected, using CPU")
+        
+        return True
+        
+    except ImportError:
+        print("❌ TensorFlow not available")
+        print("   Please install TensorFlow: pip install tensorflow>=2.13.0")
+        print("   Or activate the tf-m1 conda environment")
+        return False
+    except Exception as e:
+        print(f"❌ Error validating TensorFlow: {e}")
+        return False
+
+# Validate environment before importing modules
+env_valid = validate_environment()
+if not env_valid:
+    print("\n⚠️  Environment validation failed. LSTM volatility forecasting may not work properly.")
+    print("   The system will fall back to EWMA volatility estimation.")
+    print("   To fix this, ensure TensorFlow is installed and properly configured.\n")
 
 from backtesting_module import (
     DataHandler, GreeksEngine, Portfolio, PositionSizer, ExecutionHandler,
@@ -40,6 +93,7 @@ from backtesting_module import (
 from backtesting_module.strategy import BuyAndHoldStrategy
 from backtesting_module.data_handler import DataHandler
 from backtesting_module.volatility_forecaster import VolatilityForecaster
+from backtesting_module.lstm_volatility_forecaster import LSTMVolatilityForecaster, create_lstm_volatility_forecaster
 
 def get_risk_free_rate_from_fred(fred_api_key: Optional[str] = None, fallback_rate: float = 0.02) -> float:
     """
@@ -269,17 +323,19 @@ class BacktestEngine:
         # Dummy implementation for now
         return {}
 
-def find_best_straddle_combinations(calls, puts, current_stock_price):
+def find_best_straddle_combinations(calls, puts, current_stock_price, min_dte_days=10):
     """
     Find the best straddle combinations based on:
     1. Same strike price (symmetric straddle)
     2. Same expiry date
     3. Close to ATM (current stock price)
     4. Good liquidity (number of bars)
+    5. Minimum days to expiry (to avoid high gamma)
     
     Returns:
-        List of tuples: (call_ticker, put_ticker, strike, expiry, atm_distance, liquidity_score)
+        List of tuples: (call_ticker, put_ticker, strike, expiry, atm_distance, liquidity_score, dte_days)
     """
+    from datetime import datetime
     best_combinations = []
     
     for call_ticker, call_bars in calls:
@@ -296,20 +352,29 @@ def find_best_straddle_combinations(calls, puts, current_stock_price):
             
             # Check if same strike and expiry
             if call_strike == put_strike and call_expiry == put_expiry:
+                # Calculate days to expiry
+                dte_days = (call_expiry - datetime.now(timezone.utc)).days
+                
+                # Skip if too close to expiry
+                if dte_days < min_dte_days:
+                    continue
+                
                 atm_distance = abs(call_strike - current_stock_price)
                 liquidity_score = min(call_bars, put_bars)  # Use the lower of the two
                 
                 # Calculate a combined score (lower is better)
-                # Weight ATM distance more heavily than liquidity
-                combined_score = atm_distance * 2 + (1000 / liquidity_score) if liquidity_score > 0 else float('inf')
+                # Weight ATM distance heavily, then liquidity, then DTE
+                combined_score = (atm_distance * 3 + 
+                                (1000 / liquidity_score) if liquidity_score > 0 else float('inf') +
+                                max(0, 20 - dte_days) * 0.1)  # Prefer longer DTE
                 
                 best_combinations.append((
                     call_ticker, put_ticker, call_strike, call_expiry, 
-                    atm_distance, liquidity_score, combined_score
+                    atm_distance, liquidity_score, dte_days, combined_score
                 ))
     
     # Sort by combined score (best first)
-    best_combinations.sort(key=lambda x: x[6])
+    best_combinations.sort(key=lambda x: x[7])
     
     return best_combinations[:10]  # Return top 10
 
@@ -382,36 +447,143 @@ def main():
     rebalancing_freq = rebalancing_freq_map.get(rebal_choice, "daily")
     print(f"Using {rebalancing_freq} rebalancing")
     
-    # Delta threshold setup
+    # Delta threshold setup (in shares)
     print("\n🎯 Delta Threshold Setup:")
-    print("Only rebalance when portfolio delta deviates from target by this amount")
-    delta_threshold_input = input("Enter delta threshold (0.01-0.10) [default: 0.05]: ").strip()
+    print("Only rebalance when portfolio delta deviates from target by this amount (in shares)")
+    delta_threshold_input = input("Enter delta threshold in shares (10-100) [default: 25]: ").strip()
     if not delta_threshold_input:
-        delta_threshold = 0.05
+        delta_threshold = 25
     else:
         try:
             delta_threshold = float(delta_threshold_input)
-            delta_threshold = max(0.01, min(0.10, delta_threshold))  # Clamp between 0.01 and 0.10
+            delta_threshold = max(10, min(100, delta_threshold))  # Clamp between 10 and 100 shares
         except ValueError:
-            delta_threshold = 0.05
-            print("Invalid input, using default threshold of 0.05")
+            delta_threshold = 25
+            print("Invalid input, using default threshold of 25 shares")
     
-    print(f"Using delta threshold: {delta_threshold}")
+    print(f"Using delta threshold: {delta_threshold} shares")
     
-    # Volatility forecasting setup (simplified)
+    # Volatility forecasting setup
     print("\n🔮 Volatility Forecasting Setup:")
-    print("1. Use local model from volatility_models folder")
-    print("2. Use fallback method (exponentially weighted)")
+    print("1. 🤖 LSTM model from volatility_models folder (recommended)")
+    print("   - Uses pre-trained LSTM from Google Colab")
+    print("   - Processes hourly realized volatility data")
+    print("   - 60-hour memory window for predictions")
+    print("   - Automatic fallback to EWMA on errors")
+    print("2. 📁 Other local model from volatility_models folder")
+    print("3. 📊 Fallback method (exponentially weighted)")
     
-    vol_choice = input("Choose volatility forecasting method (1/2) [default: 2]: ").strip()
+    vol_choice = input("Choose volatility forecasting method (1/2/3) [default: 1]: ").strip()
     if not vol_choice:
-        vol_choice = "2"
+        vol_choice = "1"
+    
+    # Show environment status for LSTM
+    if vol_choice == "1":
+        print(f"\n🔍 LSTM Environment Status:")
+        if env_valid:
+            print(f"   ✅ TensorFlow environment ready")
+            print(f"   ✅ LSTM integration available")
+        else:
+            print(f"   ⚠️  TensorFlow environment issues detected")
+            print(f"   ⚠️  LSTM may fall back to EWMA method")
     
     volatility_forecaster = None
+    use_batch_predictions = False
     
     if vol_choice == "1":
-        # Local model from volatility_models folder
-        import os
+        # LSTM model from volatility_models folder
+        volatility_models_dir = "volatility_models"
+        
+        # Check for LSTM model files
+        lstm_model_path = os.path.join(volatility_models_dir, "volatility_lstm_model.h5")
+        lstm_scaler_path = os.path.join(volatility_models_dir, "volatility_scaler.pkl")
+        
+        print(f"\n🤖 LSTM Volatility Forecasting Setup")
+        print(f"   Model path: {lstm_model_path}")
+        print(f"   Scaler path: {lstm_scaler_path}")
+        
+        if os.path.exists(lstm_model_path) and os.path.exists(lstm_scaler_path):
+            print(f"✅ LSTM model files found")
+            
+            # Check environment compatibility
+            if not env_valid:
+                print("⚠️  Environment validation failed earlier")
+                print("   LSTM model may not load properly")
+                proceed = input("   Continue anyway? (y/N): ").strip().lower()
+                if proceed != 'y':
+                    print("   Using fallback EWMA method")
+                    volatility_forecaster = VolatilityForecaster(fallback_method="ewm")
+                    use_batch_predictions = False
+                else:
+                    print("   Proceeding with LSTM loading...")
+            
+            try:
+                print(f"   Loading LSTM model and scaler...")
+                volatility_forecaster = create_lstm_volatility_forecaster(
+                    model_path=lstm_model_path,
+                    scaler_path=lstm_scaler_path,
+                    memory_window=60  # Match the Colab training
+                )
+                
+                if volatility_forecaster.is_model_loaded:
+                    print("✅ LSTM volatility model loaded successfully")
+                    print("   Using hourly realized volatility forecasting")
+                    print("   Memory window: 60 hours")
+                    print("   Data format: Matches Colab training")
+                    
+                    # Show model information
+                    model_info = volatility_forecaster.get_model_info()
+                    print(f"   Model status: {'✅ Loaded' if model_info['model_loaded'] else '❌ Failed'}")
+                    print(f"   Memory window: {model_info['memory_window']} hours")
+                    
+                    use_batch_predictions = False  # LSTM handles its own batching
+                    
+                    # Test the model with a simple prediction
+                    print(f"   Testing model with sample data...")
+                    try:
+                        # Create a simple test DataFrame
+                        test_dates = pd.date_range(start='2024-01-01', periods=100, freq='h', tz='America/New_York')
+                        test_prices = 100 + np.cumsum(np.random.randn(100) * 0.01)
+                        test_df = pd.DataFrame({'close': test_prices}, index=test_dates)
+                        
+                        test_forecast = volatility_forecaster.forecast_volatility(
+                            test_df, test_dates[-1], "TEST"
+                        )
+                        print(f"   ✅ Test forecast: {test_forecast:.4f} ({test_forecast*100:.2f}%)")
+                        
+                    except Exception as test_error:
+                        print(f"   ⚠️  Test prediction failed: {test_error}")
+                        print("   Model loaded but may have compatibility issues")
+                        
+                else:
+                    print("❌ LSTM model failed to load")
+                    print("   This could be due to:")
+                    print("   - TensorFlow version incompatibility")
+                    print("   - Model file corruption")
+                    print("   - Missing dependencies")
+                    print("   Falling back to EWMA method")
+                    volatility_forecaster = VolatilityForecaster(fallback_method="ewm")
+                    use_batch_predictions = False
+                    
+            except Exception as e:
+                print(f"❌ Error loading LSTM model: {e}")
+                print("   Detailed error information:")
+                import traceback
+                traceback.print_exc()
+                print("   Falling back to EWMA method")
+                volatility_forecaster = VolatilityForecaster(fallback_method="ewm")
+                use_batch_predictions = False
+        else:
+            print(f"❌ LSTM model files not found:")
+            print(f"   Expected: {lstm_model_path}")
+            print(f"   Expected: {lstm_scaler_path}")
+            print("   Please ensure your Colab-trained model files are in the volatility_models folder")
+            print("   Using fallback method for now")
+            volatility_forecaster = VolatilityForecaster(fallback_method="ewm")
+            use_batch_predictions = False
+    
+    elif vol_choice == "2":
+        # Other local model from volatility_models folder
         volatility_models_dir = "volatility_models"
         
         # Create directory if it doesn't exist
@@ -419,11 +591,11 @@ def main():
             os.makedirs(volatility_models_dir)
             print(f"Created {volatility_models_dir} directory")
         
-        # List available models
+        # List available models (excluding LSTM files)
         model_files = []
         if os.path.exists(volatility_models_dir):
             for file in os.listdir(volatility_models_dir):
-                if file.endswith(('.pkl', '.h5', '.keras', '.json')):
+                if file.endswith(('.pkl', '.h5', '.keras', '.json')) and not file.startswith('volatility_lstm'):
                     model_files.append(file)
         
         if model_files:
@@ -460,8 +632,6 @@ def main():
                     
                     if use_batch_predictions:
                         print("Using batch predictions for efficiency")
-                        # Note: Batch predictions will be computed after stock data is loaded
-                        # This will be handled later in the code
                         print("Batch predictions will be computed after data loading...")
                     
                 else:
@@ -859,7 +1029,30 @@ def main():
     
     # Get initial volatility forecast for comparison
     print("\n📊 Getting initial volatility forecast...")
-    if use_batch_predictions:
+    if isinstance(volatility_forecaster, LSTMVolatilityForecaster):
+        # Detect data interval for initial forecast
+        interval = volatility_forecaster.detect_time_interval(stock_df)
+        print(f"   Data interval: {interval}")
+        
+        # Check if we have enough data for LSTM
+        if interval == 'minute':
+            min_data_points = volatility_forecaster.memory_window * 60
+        elif interval.startswith('minute'):
+            minute_val = int(interval.replace('minute', ''))
+            min_data_points = volatility_forecaster.memory_window * 60 // minute_val
+        elif interval == 'hour':
+            min_data_points = volatility_forecaster.memory_window
+        elif interval == 'day':
+            min_data_points = volatility_forecaster.memory_window // 24
+        else:
+            min_data_points = volatility_forecaster.memory_window * 60
+        
+        if len(stock_df) < min_data_points:
+            print(f"   ⚠️  Insufficient data for LSTM: Need {min_data_points} {interval}, have {len(stock_df)}")
+            sigma_forecast = volatility_forecaster._fallback_forecast(stock_df, symbol)
+        else:
+            sigma_forecast = volatility_forecaster.forecast_volatility(stock_df, combined_df.index[0], symbol)
+    elif use_batch_predictions:
         # Use pre-computed forecast
         sigma_forecast = volatility_forecasts.get(combined_df.index[0], 0.2)
     else:
@@ -997,6 +1190,15 @@ def main():
     rebalance_count = 0
     position_changes = 0
     
+    # LSTM performance tracking
+    lstm_forecast_count = 0
+    lstm_fallback_count = 0
+    lstm_error_count = 0
+    
+    # Position tracking for hysteresis
+    current_position_side = position_side  # Track current position
+    last_vol_diff = vol_diff  # Track last vol_diff for hysteresis
+    
     for i, (ts, row) in enumerate(combined_df.iterrows()):
         S = float(row[f'{symbol}_close'])
         call_price = float(row[f'{call_ticker}_close'])
@@ -1025,13 +1227,13 @@ def main():
         current_portfolio_delta = 0.0
         if current_call_qty != 0 or current_put_qty != 0:
             try:
-                # Get current Greeks for delta calculation
+                # Get current Greeks for delta calculation using fresh implied vol
                 current_greeks = greeks_engine.compute(
                     symbol=call_ticker,
                     underlying_price=S,
                     strike=call_strike,
                     time_to_expiry=T,
-                    volatility=0.20,  # Use reasonable default for delta calculation
+                    volatility=sigma_implied,  # Use fresh implied vol
                     risk_free_rate=r,
                     option_type="call"
                 )
@@ -1042,14 +1244,14 @@ def main():
                     underlying_price=S,
                     strike=put_strike,
                     time_to_expiry=T,
-                    volatility=0.20,  # Use reasonable default for delta calculation
+                    volatility=sigma_implied,  # Use fresh implied vol
                     risk_free_rate=r,
                     option_type="put"
                 )
                 current_put_delta = current_put_greeks['delta']
                 
-                current_portfolio_delta = (current_call_qty * current_call_delta + 
-                                          current_put_qty * current_put_delta + 
+                current_portfolio_delta = (100 * current_call_qty * current_call_delta + 
+                                          100 * current_put_qty * current_put_delta + 
                                           current_stock_qty)
             except Exception as e:
                 print(f"Warning: Could not calculate current portfolio delta at {ts}: {e}")
@@ -1101,21 +1303,99 @@ def main():
                 print(f"Warning: Could not calculate implied volatility at {ts}: {e}")
                 sigma_implied = 0.20  # Fallback
             
-            # 2. Get volatility forecast
-            if use_batch_predictions:
-                sigma_forecast = volatility_forecasts.get(ts_timestamp, 0.2)
-            else:
-                current_price_data = stock_df['close'].loc[:ts_timestamp]
-                sigma_forecast = volatility_forecaster.forecast_volatility(current_price_data, ts_timestamp)
+            # 2. Get volatility forecast with enhanced error handling
+            try:
+                if isinstance(volatility_forecaster, LSTMVolatilityForecaster):
+                    # LSTM forecaster needs the full stock data up to current timestamp
+                    # Fix: Compute required rows based on detected interval
+                    interval = volatility_forecaster.detect_time_interval(stock_df)
+                    if interval == 'minute':
+                        need = volatility_forecaster.memory_window * 60   # 60 hours * 60 minutes
+                    elif interval.startswith('minute'):
+                        m = int(interval.replace('minute',''))
+                        need = volatility_forecaster.memory_window * (60 // m)
+                    elif interval == 'hour':
+                        need = volatility_forecaster.memory_window
+                    elif interval == 'day':
+                        need = max(1, volatility_forecaster.memory_window // 24)
+                    else:
+                        need = volatility_forecaster.memory_window * 60  # safe default
+                    
+                    buffer = int(0.25 * need)  # 25% buffer
+                    max_data_points = need + buffer
+                    
+                    if len(stock_df) > max_data_points:
+                        # Use only the most recent data to save memory
+                        current_stock_data = stock_df.tail(max_data_points)
+                    else:
+                        current_stock_data = stock_df.loc[:ts_timestamp]
+                    
+                    # Check if we have enough data for LSTM
+                    # Detect data interval and calculate minimum required data points
+                    interval = volatility_forecaster.detect_time_interval(current_stock_data)
+                    
+                    if interval == 'minute':
+                        min_data_points = volatility_forecaster.memory_window * 60  # 60 hours = 3600 minutes
+                    elif interval.startswith('minute'):
+                        # For multi-minute data, calculate accordingly
+                        minute_val = int(interval.replace('minute', ''))
+                        min_data_points = volatility_forecaster.memory_window * 60 // minute_val
+                    elif interval == 'hour':
+                        min_data_points = volatility_forecaster.memory_window  # 60 hours
+                    elif interval == 'day':
+                        min_data_points = volatility_forecaster.memory_window // 24  # Convert hours to days
+                    else:
+                        min_data_points = volatility_forecaster.memory_window * 60  # Default to minute assumption
+                    
+                    if len(current_stock_data) < min_data_points:
+                        print(f"⚠️  Insufficient data for LSTM at {ts_timestamp.date()}: Need {min_data_points} {interval} ({volatility_forecaster.memory_window} hours), have {len(current_stock_data)}")
+                        sigma_forecast = volatility_forecaster._fallback_forecast(current_stock_data, symbol)
+                        lstm_fallback_count += 1
+                    else:
+                        sigma_forecast = volatility_forecaster.forecast_volatility(current_stock_data, ts_timestamp, symbol)
+                        
+                        # Validate LSTM forecast
+                        if pd.isna(sigma_forecast) or sigma_forecast <= 0:
+                            print(f"⚠️  Invalid LSTM forecast at {ts_timestamp.date()}: {sigma_forecast}")
+                            sigma_forecast = volatility_forecaster._fallback_forecast(current_stock_data, symbol)
+                            lstm_fallback_count += 1
+                        else:
+                            lstm_forecast_count += 1
+                            
+                elif use_batch_predictions:
+                    sigma_forecast = volatility_forecasts.get(ts_timestamp, 0.2)
+                else:
+                    current_price_data = stock_df['close'].loc[:ts_timestamp]
+                    sigma_forecast = volatility_forecaster.forecast_volatility(current_price_data, ts_timestamp)
+                    
+            except Exception as vol_error:
+                print(f"⚠️  Volatility forecasting error at {ts_timestamp.date()}: {vol_error}")
+                lstm_error_count += 1
+                # Use fallback method
+                if isinstance(volatility_forecaster, LSTMVolatilityForecaster):
+                    current_stock_data = stock_df.loc[:ts_timestamp]
+                    sigma_forecast = volatility_forecaster._fallback_forecast(current_stock_data, symbol)
+                    lstm_fallback_count += 1
+                else:
+                    sigma_forecast = 0.2  # Default volatility
             
-            # 3. Compute vol_diff signal
+            # 3. Sanity check and clip volatility forecasts
+            sigma_forecast = max(0.05, min(2.0, sigma_forecast))  # Clip to 5%-200% range
+            sigma_implied = max(0.05, min(2.0, sigma_implied))    # Clip to 5%-200% range
+            
+            # 4. Compute vol_diff signal
             vol_diff = sigma_forecast - sigma_implied
             
-            # 4. Determine new position based on vol_diff
-            new_position_side = 0
-            if vol_diff > threshold:
+            # 5. Determine new position based on vol_diff (with no-trade band and hysteresis)
+            new_position_side = current_position_side  # Default to current position
+            
+            min_vol_diff = 0.03  # 3% minimum vol difference to trade
+            hysteresis_threshold = 0.05  # Additional 5% to flip position
+            
+            # Only change position if vol_diff crosses threshold with hysteresis
+            if current_position_side <= 0 and vol_diff > max(threshold, min_vol_diff) + hysteresis_threshold:
                 new_position_side = 1  # Long straddle
-            elif vol_diff < -threshold:
+            elif current_position_side >= 0 and vol_diff < -max(threshold, min_vol_diff) - hysteresis_threshold:
                 new_position_side = -1  # Short straddle
             
             # 5. Calculate Greeks for both call and put using IMPLIED volatility
@@ -1181,9 +1461,9 @@ def main():
                 new_stock_qty = int(round(new_stock_qty))
             
             # 7. Calculate new portfolio delta for monitoring
-            new_portfolio_delta = (new_call_qty * call_delta + 
-                                  new_put_qty * put_delta + 
-                                  new_stock_qty)
+            new_portfolio_delta = (100 * new_call_qty * call_delta + 
+                                 100 * new_put_qty * put_delta + 
+                                 new_stock_qty)
             
             # Log delta deviation for monitoring
             delta_deviation = abs(new_portfolio_delta - 0.0)  # Target delta is 0
@@ -1211,9 +1491,27 @@ def main():
                     portfolio.update_with_fill(Fill(symbol=symbol, qty=stock_trade, price=S, timestamp=ts_timestamp))
                     print(f"📈 Stock hedge at {ts_timestamp.date()}: {current_stock_qty} → {new_stock_qty} {symbol}")
                 
-                # Log rebalancing info
+                # Log rebalancing info with LSTM status
                 rebalance_count += 1
-                print(f"🔄 Rebalanced at {ts_timestamp.date()}: vol_diff={vol_diff:.4f}, signal={new_position_side}")
+                lstm_status = ""
+                if isinstance(volatility_forecaster, LSTMVolatilityForecaster):
+                    if lstm_forecast_count > 0 and (lstm_forecast_count + lstm_fallback_count) > 0:
+                        lstm_success_rate = (lstm_forecast_count / (lstm_forecast_count + lstm_fallback_count)) * 100
+                        lstm_status = f" [LSTM: {lstm_success_rate:.0f}%]"
+                    else:
+                        lstm_status = " [LSTM: Loading...]"
+                
+                print(f"🔄 Rebalanced at {ts_timestamp.date()}: vol_diff={vol_diff:.4f}, signal={new_position_side}{lstm_status}")
+                
+                # Update quantities and position tracking
+                current_call_qty = new_call_qty
+                current_put_qty = new_put_qty
+                current_stock_qty = new_stock_qty
+                
+                # Update position tracking for hysteresis
+                if new_position_side != current_position_side:
+                    current_position_side = new_position_side
+                    last_vol_diff = vol_diff
             
             # Update last rebalance date
             last_rebalance_date = ts_timestamp
@@ -1246,14 +1544,53 @@ def main():
     
     # Volatility forecasting performance
     if volatility_forecaster:
-        vol_metrics = volatility_forecaster.get_performance_metrics()
-        if vol_metrics:
-            print(f"\n📊 Volatility Forecasting Performance:")
-            print(f"   MAE: {vol_metrics['mae']*100:.2f}%")
-            print(f"   RMSE: {vol_metrics['rmse']*100:.2f}%")
-            print(f"   MAPE: {vol_metrics['mape']:.2f}%")
-            print(f"   Correlation: {vol_metrics['correlation']:.3f}")
-            print(f"   Forecasts made: {vol_metrics['n_forecasts']}")
+        if isinstance(volatility_forecaster, LSTMVolatilityForecaster):
+            print(f"\n🤖 LSTM Volatility Forecasting Performance:")
+            
+            # Show runtime statistics
+            total_forecasts = lstm_forecast_count + lstm_fallback_count + lstm_error_count
+            if total_forecasts > 0:
+                lstm_success_rate = (lstm_forecast_count / total_forecasts) * 100
+                fallback_rate = (lstm_fallback_count / total_forecasts) * 100
+                error_rate = (lstm_error_count / total_forecasts) * 100
+                
+                print(f"   Runtime Statistics:")
+                print(f"   - LSTM forecasts: {lstm_forecast_count} ({lstm_success_rate:.1f}%)")
+                print(f"   - Fallback forecasts: {lstm_fallback_count} ({fallback_rate:.1f}%)")
+                print(f"   - Errors: {lstm_error_count} ({error_rate:.1f}%)")
+                print(f"   - Total forecasts: {total_forecasts}")
+            
+            # Show model performance metrics
+            vol_metrics = volatility_forecaster.get_performance_metrics()
+            if vol_metrics:
+                print(f"\n   Model Performance Metrics:")
+                print(f"   - MAE: {vol_metrics['mae']*100:.2f}%")
+                print(f"   - RMSE: {vol_metrics['rmse']*100:.2f}%")
+                print(f"   - MAPE: {vol_metrics['mape']:.2f}%")
+                print(f"   - Correlation: {vol_metrics['correlation']:.3f}")
+                print(f"   - Forecasts made: {vol_metrics['n_forecasts']}")
+            
+            # Show model info
+            model_info = volatility_forecaster.get_model_info()
+            print(f"\n📊 LSTM Model Information:")
+            print(f"   Model loaded: {model_info['model_loaded']}")
+            print(f"   Memory window: {model_info['memory_window']} hours")
+            print(f"   Total forecasts: {model_info['n_forecasts']}")
+            
+            # Memory optimization summary
+            print(f"\n💾 Memory Optimization:")
+            print(f"   Data window: {volatility_forecaster.memory_window + 24} hours")
+            print(f"   Memory-efficient processing: ✅ Enabled")
+            
+        else:
+            vol_metrics = volatility_forecaster.get_performance_metrics()
+            if vol_metrics:
+                print(f"\n📊 Volatility Forecasting Performance:")
+                print(f"   MAE: {vol_metrics['mae']*100:.2f}%")
+                print(f"   RMSE: {vol_metrics['rmse']*100:.2f}%")
+                print(f"   MAPE: {vol_metrics['mape']:.2f}%")
+                print(f"   Correlation: {vol_metrics['correlation']:.3f}")
+                print(f"   Forecasts made: {vol_metrics['n_forecasts']}")
 
 if __name__ == "__main__":
     main()

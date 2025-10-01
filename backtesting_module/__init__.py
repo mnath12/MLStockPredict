@@ -7,6 +7,8 @@ from .position_sizer import PositionSizer
 from .execution_handler import ExecutionHandler
 from .strategy import BaseStrategy, DeltaHedgingMixin, DeltaGammaHedgingMixin, LSTMStrategy
 from .entities import Order, Fill, Position, Option, Stock
+from .volatility_forecaster import VolatilityForecaster
+from .lstm_volatility_forecaster import LSTMVolatilityForecaster, create_lstm_volatility_forecaster
 
 __all__ = [
     "DataHandler",
@@ -23,4 +25,7 @@ __all__ = [
     "Position",
     "Option",
     "Stock",
+    "VolatilityForecaster",
+    "LSTMVolatilityForecaster",
+    "create_lstm_volatility_forecaster",
 ]

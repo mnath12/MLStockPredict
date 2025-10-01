@@ -92,6 +92,50 @@
   - [ ] Performance optimization and testing
   - [ ] Documentation and final validation
 
+### 5. Performance Targets and Strategy Expansion (BEFORE 9/1)
+- [ ] **Performance Benchmarking** 🔄 WEEK 1-2
+  - [ ] Fix Sharpe ratio calculation (target: >2.0)
+  - [ ] Ensure returns exceed risk-free rate + compounding
+  - [ ] Add benchmark comparison (S&P 500, risk-free rate)
+  - [ ] Implement proper risk metrics (VaR, max drawdown, etc.)
+  - [ ] Create performance attribution analysis
+
+- [ ] **Stock Prediction + RL Strategy Integration** 🔄 WEEK 2-3
+  - [ ] Integrate existing stock prediction model
+  - [ ] Implement reinforcement learning for optimal trade selection
+  - [ ] Create multi-strategy backtesting framework
+  - [ ] Add strategy comparison and selection logic
+  - [ ] Test combined strategy performance
+
+- [ ] **Research Documentation** 🔄 WEEK 3-4
+  - [ ] Document all time series forecasting methods attempted
+  - [ ] Create research summary for quant recruiters
+  - [ ] Add methodology comparison and lessons learned
+  - [ ] Create portfolio of failed experiments (valuable for research)
+
+### 6. Code Cleanup and Demo Website (BEFORE 9/1)
+- [ ] **Code Cleanup and Refactoring** 🔄 WEEK 2
+  - [ ] Refactor main.py into modular components
+  - [ ] Add comprehensive error handling and logging
+  - [ ] Create configuration management system
+  - [ ] Add unit tests for critical functions
+  - [ ] Document all functions and classes
+  - [ ] Create setup.py and requirements.txt for easy installation
+
+- [ ] **Demo Website Development** 🔄 WEEK 3
+  - [ ] Create simple web interface for strategy backtesting
+  - [ ] Add interactive parameter selection (stock, date range, strategy params)
+  - [ ] Display backtest results with charts and metrics
+  - [ ] Add model training/validation interface
+  - [ ] Deploy to simple hosting (Heroku/Vercel/Streamlit)
+  - [ ] Create user documentation and demo
+
+- [ ] **System Documentation** 🔄 WEEK 4
+  - [ ] Create comprehensive README with setup instructions
+  - [ ] Document API endpoints and data formats
+  - [ ] Create user guide for strategy configuration
+  - [ ] Add developer documentation for extending the system
+
 ### 5. Retraining and Model Management (PLANNED)
 - [ ] **Rolling window forecasting** 🔄 PLANNED
   - [ ] Set up expanding window data splitting for volatility forecasting
@@ -263,12 +307,23 @@ def rolling_window_forecast(self, model, data, window_size, retrain_freq):
 3. **Missing Components**: Model configuration files, training history, local training pipeline
 4. **Validation Framework**: Ready to test models with comprehensive metrics
 
-### Next Steps (Aggressive Integration Timeline)
+### Next Steps (Complete Timeline - Before 9/1)
+**Phase 1: Integration (This Week)**
 1. **Day 1 (Today)**: Test existing models with validation framework
 2. **Day 2 (Tomorrow)**: Extract training pipeline from notebook to local script
 3. **Day 3**: Integrate local training with backtesting system
 4. **Day 4-5**: Optimize and finalize complete integration
-5. **Ongoing**: Fix Sharpe ratio calculation and validate complete system
+
+**Phase 2: Cleanup (Week 2)**
+5. **Week 2**: Code refactoring, modularization, and documentation
+
+**Phase 3: Demo Website (Week 3)**
+6. **Week 3**: Create web interface and deploy demo
+
+**Phase 4: Final Documentation (Week 4)**
+7. **Week 4**: Complete system documentation and user guides
+
+**Ongoing**: Fix Sharpe ratio calculation and validate complete system
 
 ### Files Created Today
 - `volatility_model_validator.py` - Enhanced with configurable parameters
