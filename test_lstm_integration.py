@@ -68,10 +68,11 @@ def test_data_handler():
     
     try:
         # Initialize data handler with your API keys
+        from config import ALPACA_API_KEY, ALPACA_SECRET_KEY, POLYGON_API_KEY
         data_handler = DataHandler(
-            alpaca_api_key="PKCLL4TXCDLRN76OGRAB",
-            alpaca_secret="ig5CGnl3c1jXEepU6VK5DPXgsV5WSOBYrIJGk70T",
-            polygon_key="ejp0y0ppSQJzIX1W8qSoTIvL5ja3ctO9",
+            alpaca_api_key=ALPACA_API_KEY,
+            alpaca_secret=ALPACA_SECRET_KEY,
+            polygon_key=POLYGON_API_KEY,
         )
         
         # Test fetching stock data

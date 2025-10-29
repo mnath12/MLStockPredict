@@ -492,13 +492,15 @@ def demonstrate_enhanced_iv_surface():
     
     # Use demo keys if none provided
     if not alpaca_key:
-        alpaca_key = "PKCLL4TXCDLRN76OGRAB"
-        alpaca_secret = "ig5CGnl3c1jXEepU6VK5DPXgsV5WSOBYrIJGk70T"
-        print("Using demo Alpaca credentials")
+        from config import ALPACA_API_KEY, ALPACA_SECRET_KEY, POLYGON_API_KEY
+        alpaca_key = ALPACA_API_KEY
+        alpaca_secret = ALPACA_SECRET_KEY
+        print("Using Alpaca credentials from config")
     
     if not polygon_key:
-        polygon_key = "ejp0y0ppSQJzIX1W8qSoTIvL5ja3ctO9"
-        print("Using demo Polygon credentials")
+        from config import POLYGON_API_KEY
+        polygon_key = POLYGON_API_KEY
+        print("Using Polygon credentials from config")
     
     # Initialize data handler
     try:

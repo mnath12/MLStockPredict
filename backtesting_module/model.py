@@ -17,8 +17,7 @@ from alpaca.data.timeframe  import TimeFrame, TimeFrameUnit
 import re
 import pytz
 
-KEY = "PKCLL4TXCDLRN76OGRAB"
-SECRET = "ig5CGnl3c1jXEepU6VK5DPXgsV5WSOBYrIJGk70T"
+from config import ALPACA_API_KEY as KEY, ALPACA_SECRET_KEY as SECRET
 
 def _parse_timeframe(freq: str) -> TimeFrame:
     """

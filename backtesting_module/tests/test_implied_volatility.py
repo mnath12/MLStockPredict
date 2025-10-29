@@ -693,9 +693,9 @@ class TestImpliedVolatility(unittest.TestCase):
     """Test suite for implied volatility calculations."""
     def setUp(self):
         self.data_handler = DataHandler(
-            alpaca_api_key="PKCLL4TXCDLRN76OGRAB",
-            alpaca_secret="ig5CGnl3c1jXEepU6VK5DPXgsV5WSOBYrIJGk70T",
-            polygon_key="ejp0y0ppSQJzIX1W8qSoTIvL5ja3ctO9"
+            alpaca_api_key=self.alpaca_key,
+            alpaca_secret=self.alpaca_secret,
+            polygon_key=self.polygon_key
         )
         self.engine = GreeksEngine()
 

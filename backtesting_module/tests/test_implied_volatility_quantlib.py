@@ -29,10 +29,13 @@ class TestImpliedVolatilityQuantLib(unittest.TestCase):
         if not QUANTLIB_AVAILABLE:
             self.skipTest("QuantLib is not available")
             
-        # Mock API keys for testing (replace with real keys for integration tests)
-        self.alpaca_key = "PKCLL4TXCDLRN76OGRAB"
-        self.alpaca_secret = "ig5CGnl3c1jXEepU6VK5DPXgsV5WSOBYrIJGk70T" 
-        self.polygon_key = "ejp0y0ppSQJzIX1W8qSoTIvL5ja3ctO9"
+        # Import API keys from config
+        import sys
+        sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+        from config import ALPACA_API_KEY, ALPACA_SECRET_KEY, POLYGON_API_KEY
+        self.alpaca_key = ALPACA_API_KEY
+        self.alpaca_secret = ALPACA_SECRET_KEY
+        self.polygon_key = POLYGON_API_KEY
    
         # Initialize handlers
         self.data_handler = DataHandler(
@@ -419,9 +422,9 @@ def run_quantlib_option_ticker_test():
         print("\nInitializing data handlers...")
         
         data_handler = DataHandler(
-            alpaca_api_key="PKCLL4TXCDLRN76OGRAB",
-            alpaca_secret="ig5CGnl3c1jXEepU6VK5DPXgsV5WSOBYrIJGk70T", 
-            polygon_key="ejp0y0ppSQJzIX1W8qSoTIvL5ja3ctO9"
+            alpaca_api_key=self.alpaca_key,
+            alpaca_secret=self.alpaca_secret, 
+            polygon_key=self.polygon_key
         )
         greeks_engine = GreeksEngine()
         

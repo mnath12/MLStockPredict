@@ -271,9 +271,8 @@ class AlpacaIntradayDataFetcher:
 
 # Example usage and testing
 if __name__ == "__main__":
-    # Example usage - replace with your actual API keys
-    API_KEY = "6a3ea255-7f31-455c-8e41-6e444b1c4fc6"
-    SECRET_KEY = "ig5CGnl3c1jXEepU6VK5DPXgsV5WSOBYrIJGk70T"
+    # Import API keys from config
+    from config import ALPACA_API_KEY as API_KEY, ALPACA_SECRET_KEY as SECRET_KEY
     
     # Initialize fetcher
     fetcher = AlpacaIntradayDataFetcher(API_KEY, SECRET_KEY)
