@@ -23,7 +23,7 @@ from backtesting_module.quantlib import compute_iv_quantlib
 from backtesting_module.data_handler import DataHandler
 
 # Configuration
-TICKER = "TSLA"
+TICKER = "AAPL"
 RISK_FREE_RATE = 0.05  # 5% annual
 DIVIDEND_YIELD = 0.0
 EXERCISE_STYLE = "american"
@@ -128,6 +128,11 @@ def fetch_option_data(ticker: str, today: date) -> pd.DataFrame:
         )
         
         print(f"✅ Found {len(option_tickers)} option contracts")
+        print(f"   Expiration limit: up to {exp_to} (next {DAYS_LIMIT} days)")
+        print(f"   Strike range: ${strike_min:.2f} - ${strike_max:.2f}")
+        if option_tickers:
+            preview_count = min(5, len(option_tickers))
+            print(f"   Preview tickers ({preview_count}): {option_tickers[:preview_count]}")
         
     except Exception as e:
         print(f"❌ Error fetching option contracts: {e}")
@@ -136,36 +141,54 @@ def fetch_option_data(ticker: str, today: date) -> pd.DataFrame:
     # Process options and get pricing data
     print(f"\n📊 Processing option prices...")
     option_data = []
+    skip_stats = {
+        "decode_failed": 0,
+        "expiry_out_of_range": 0,
+        "price_fetch_error": 0,
+        "empty_price_series": 0,
+        "iv_failure": 0,
+        "unexpected": 0
+    }
     
     # Increase limit to get more variety in expiries
-    for i, opt_ticker in enumerate(option_tickers[:500]):  # Limit to 200 for more expiries
-        if i % 20 == 0:
-            print(f"   Processing {i+1}/{min(200, len(option_tickers))} options...")
+    total_to_process = min(500, len(option_tickers))
+    for i, opt_ticker in enumerate(option_tickers[:total_to_process]):
+        if i % 20 == 0 or i == total_to_process - 1:
+            print(f"   Processing {i+1}/{total_to_process} options...")
         
         try:
             # Decode option symbol
             meta = decode_option_symbol(opt_ticker)
             if meta is None:
+                skip_stats["decode_failed"] += 1
                 continue
             
             # Get days to expiry
             days_to_exp = (meta["expiry"] - today).days
             if days_to_exp < 0 or days_to_exp > DAYS_LIMIT:
+                skip_stats["expiry_out_of_range"] += 1
                 continue
             
             # Get option price data
-            opt_prices = data_handler.get_option_price_series(
-                option_ticker=opt_ticker,
-                start_date=today.strftime("%Y-%m-%d"),
-                end_date=today.strftime("%Y-%m-%d"),
-                timespan="day",
-                price_type="close"
-            )
-            
-            if opt_prices.empty:
+            try:
+                opt_prices = data_handler.get_option_price_series(
+                    option_ticker=opt_ticker,
+                    start_date=today.strftime("%Y-%m-%d"),
+                    end_date=today.strftime("%Y-%m-%d"),
+                    timespan="day",
+                    price_type="close"
+                )
+            except Exception as price_err:
+                skip_stats["price_fetch_error"] += 1
+                if skip_stats["price_fetch_error"] <= 5:
+                    print(f"   ⚠️  Price fetch error for {opt_ticker}: {price_err}")
                 continue
             
-            price = opt_prices.iloc[-1]
+            if opt_prices.empty:
+                skip_stats["empty_price_series"] += 1
+                continue
+            
+            price = float(opt_prices.iloc[-1])
             
             # Calculate implied volatility
             try:
@@ -194,12 +217,24 @@ def fetch_option_data(ticker: str, today: date) -> pd.DataFrame:
                 })
                 
             except Exception as e:
+                skip_stats["iv_failure"] += 1
+                if skip_stats["iv_failure"] <= 5:
+                    print(
+                        f"   ⚠️  IV calculation failed for {opt_ticker}: "
+                        f"price={price:.2f}, strike={meta['strike']}, days={days_to_exp}, error={e}"
+                    )
                 continue
                 
         except Exception as e:
+            skip_stats["unexpected"] += 1
+            if skip_stats["unexpected"] <= 5:
+                print(f"   ⚠️  Unexpected error for {opt_ticker}: {e}")
             continue
     
     print(f"✅ Successfully processed {len(option_data)} options")
+    print("   Skip summary:")
+    for reason, count in skip_stats.items():
+        print(f"     - {reason}: {count}")
     
     if len(option_data) == 0:
         return pd.DataFrame()

@@ -6,8 +6,8 @@ from typing import List, Optional, Union
 import numpy as np
 
 import pandas as pd
-from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.requests   import StockBarsRequest
+from alpaca.data.historical import StockHistoricalDataClient, OptionHistoricalDataClient
+from alpaca.data.requests   import StockBarsRequest, OptionBarsRequest
 from alpaca.data.timeframe  import TimeFrame, TimeFrameUnit
 from polygon import RESTClient
 
@@ -56,6 +56,7 @@ class DataHandler:
         tz: dt.tzinfo = dt.timezone.utc,
     ):
         self._alpaca = StockHistoricalDataClient(alpaca_api_key, alpaca_secret)
+        self._alpaca_options = OptionHistoricalDataClient(alpaca_api_key, alpaca_secret)
         self._poly   = RESTClient(polygon_key)
         self._tz     = tz
 
@@ -196,7 +197,8 @@ class DataHandler:
         price_type: str = "mid"
     ) -> pd.Series:
         """
-        Get option price series using mid price (average of bid/ask) or other price type.
+        Get option price series using Alpaca's options bars API with an optional
+        Polygon fallback. When retrieving mid prices, compute (high + low) / 2.
         
         Args:
             option_ticker: Option ticker without 'O:' prefix
@@ -210,15 +212,56 @@ class DataHandler:
         Returns:
             pd.Series: Option price series indexed by timestamp
         """
-        # Get full OHLCV data
-        bars_df = self.get_option_aggregates(
-            option_ticker=option_ticker,
-            start_date=start_date,
-            end_date=end_date,
-            timespan=timespan,
-            multiplier=multiplier,
-            adjust=adjust
-        )
+        def _alpaca_timespan(timespan_str: str) -> TimeFrame:
+            ts = timespan_str.lower()
+            if ts in ("minute", "min"):
+                return TimeFrame.Minute
+            if ts in ("hour", "hr"):
+                return TimeFrame.Hour
+            if ts in ("day", "daily"):
+                return TimeFrame.Day
+            raise ValueError(f"Unsupported timespan '{timespan_str}' for Alpaca option bars")
+        
+        start_dt = dt.datetime.fromisoformat(start_date).replace(tzinfo=self._tz)
+        end_dt = dt.datetime.fromisoformat(end_date).replace(tzinfo=self._tz)
+        
+        bars_df: pd.DataFrame | None = None
+        alpaca_error: Exception | None = None
+        
+        try:
+            req = OptionBarsRequest(
+                symbol_or_symbols=option_ticker,
+                timeframe=_alpaca_timespan(timespan),
+                start=start_dt,
+                end=end_dt,
+                limit=10_000,
+            )
+            alpaca_bars = self._alpaca_options.get_option_bars(req).df.sort_index()
+            if isinstance(alpaca_bars.index, pd.MultiIndex):
+                alpaca_bars = alpaca_bars.xs(option_ticker, level="symbol")
+            if getattr(alpaca_bars.index, "tz", None) is None:
+                alpaca_bars = alpaca_bars.tz_localize(self._tz)
+            bars_df = alpaca_bars.tz_convert(self._tz)
+        except Exception as err:
+            alpaca_error = err
+        
+        if bars_df is None or bars_df.empty:
+            # Fallback to Polygon aggregates if Alpaca request failed or returned nothing
+            try:
+                bars_df = self.get_option_aggregates(
+                    option_ticker=option_ticker,
+                    start_date=start_date,
+                    end_date=end_date,
+                    timespan=timespan,
+                    multiplier=multiplier,
+                    adjust=adjust
+                )
+            except Exception as poly_err:
+                context = f"Alpaca error: {alpaca_error}" if alpaca_error else "Alpaca returned no data"
+                raise RuntimeError(
+                    f"Failed to retrieve option bars for {option_ticker}. "
+                    f"{context}; Polygon error: {poly_err}"
+                ) from poly_err
         
         # Extract the requested price type
         if price_type == "mid":
